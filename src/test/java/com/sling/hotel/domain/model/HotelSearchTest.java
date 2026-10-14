@@ -47,7 +47,8 @@ class HotelSearchTest {
     void shouldReturnUnmodifiableAgesList() {
         var search = new HotelSearch(SEARCH_ID, HOTEL_ID, CHECK_IN, CHECK_OUT, AGES);
 
-        assertThatThrownBy(() -> search.ages().add(99))
+        var ages = search.ages();
+        assertThatThrownBy(() -> ages.add(99))
                 .isInstanceOf(UnsupportedOperationException.class);
     }
 
@@ -128,21 +129,24 @@ class HotelSearchTest {
 
     @Test
     void shouldRejectEmptyAges() {
-        assertThatThrownBy(() -> new HotelSearch(SEARCH_ID, HOTEL_ID, CHECK_IN, CHECK_OUT, Collections.emptyList()))
+        List<Integer> ages = Collections.emptyList();
+        assertThatThrownBy(() -> new HotelSearch(SEARCH_ID, HOTEL_ID, CHECK_IN, CHECK_OUT, ages))
                 .isInstanceOf(InvalidSearchException.class)
                 .hasMessageContaining("ages must not be empty");
     }
 
     @Test
     void shouldRejectNegativeAge() {
-        assertThatThrownBy(() -> new HotelSearch(SEARCH_ID, HOTEL_ID, CHECK_IN, CHECK_OUT, List.of(30, -1)))
+        var ages = List.of(30, -1);
+        assertThatThrownBy(() -> new HotelSearch(SEARCH_ID, HOTEL_ID, CHECK_IN, CHECK_OUT, ages))
                 .isInstanceOf(InvalidSearchException.class)
                 .hasMessageContaining("age must be between 0 and 100");
     }
 
     @Test
     void shouldRejectAgeAbove100() {
-        assertThatThrownBy(() -> new HotelSearch(SEARCH_ID, HOTEL_ID, CHECK_IN, CHECK_OUT, List.of(30, 101)))
+        var ages = List.of(30, 101);
+        assertThatThrownBy(() -> new HotelSearch(SEARCH_ID, HOTEL_ID, CHECK_IN, CHECK_OUT, ages))
                 .isInstanceOf(InvalidSearchException.class)
                 .hasMessageContaining("age must be between 0 and 100");
     }
@@ -215,7 +219,7 @@ class HotelSearchTest {
 
         assertAll(
                 () -> assertThat(search1).isEqualTo(search2),
-                () -> assertThat(search1.hashCode()).isEqualTo(search2.hashCode())
+                () -> assertThat(search1).hasSameHashCodeAs(search2)
         );
     }
 

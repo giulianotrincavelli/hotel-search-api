@@ -18,6 +18,10 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.context.bean.override.convention.TestBean;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -35,6 +39,7 @@ import org.springframework.kafka.test.EmbeddedKafkaBroker;
 import org.springframework.kafka.test.context.EmbeddedKafka;
 import org.springframework.kafka.test.utils.KafkaTestUtils;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -48,6 +53,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
@@ -61,6 +67,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @AutoConfigureMockMvc
 @EmbeddedKafka(
         partitions = 1,
@@ -70,6 +77,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         }
 )
 @TestPropertySource(properties = {
+        "hotel-search.kafka.partitions=1",
+        "spring.kafka.listener.concurrency=1",
         "spring.kafka.bootstrap-servers=${spring.embedded.kafka.brokers}",
         "spring.kafka.consumer.group-id=kafka-integration",
         "hotel-search.kafka.topic=" + KafkaIntegrationTest.TEST_TOPIC,
@@ -84,6 +93,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
                 "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration"
 })
 class KafkaIntegrationTest {
+
+    @TestBean
+    private Clock clock;
+
+    static Clock clock() {
+        return Clock.fixed(Instant.parse("2026-10-13T12:00:00Z"), ZoneOffset.UTC);
+    }
 
     static final String TEST_TOPIC = "hotel_availability_searches";
     static final String TEST_DLT_TOPIC = TEST_TOPIC + ".DLT";
@@ -128,13 +144,13 @@ class KafkaIntegrationTest {
     @Test
     void validMessageShouldReachSavePort() throws Exception {
         var message = new SearchKafkaMessage(
-                "search-valid", "hotel-1", "2023-12-29", "2023-12-31", List.of(30, 29));
+                "search-valid", "hotel-1", "2030-12-29", "2030-12-31", List.of(30, 29));
 
         send(new ProducerRecord<>(TEST_TOPIC, "search-valid", message));
         var captor = ArgumentCaptor.forClass(HotelSearch.class);
         verify(searchRepositoryPort, timeout(10_000)).save(captor.capture());
         assertThat(captor.getValue()).isEqualTo(new HotelSearch("search-valid", "hotel-1",
-                java.time.LocalDate.of(2023, 12, 29), java.time.LocalDate.of(2023, 12, 31), List.of(30, 29)));
+                java.time.LocalDate.of(2030, 12, 29), java.time.LocalDate.of(2030, 12, 31), List.of(30, 29)));
     }
 
     @Test
@@ -154,61 +170,68 @@ class KafkaIntegrationTest {
                             .header(CorrelationId.HEADER, "http-to-kafka-correlation")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"hotelId\":\"correlation-hotel\",\"checkIn\":\"29/12/2026\",\"checkOut\":\"31/12/2026\",\"ages\":[30,29]}"))
-                    .andExpect(status().isOk())
+                    .andExpect(status().isAccepted())
                     .andExpect(header().string(CorrelationId.HEADER, "http-to-kafka-correlation"))
                     .andExpect(jsonPath("$.searchId").isNotEmpty())
                     .andReturn();
             assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
             await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
-                assertThat(persistedSearch.get()).isNotNull();
-                assertThat(consumerCorrelation.get()).isEqualTo("http-to-kafka-correlation");
-                assertThat(consumerThread.get().isVirtual()).isTrue();
-                assertThat(logs.events()).anySatisfy(event -> {
-                    assertThat(event.getFormattedMessage()).contains("Kafka message persisted:");
-                    assertThat(event.getMDCPropertyMap()).containsEntry(CorrelationId.MDC_KEY, "http-to-kafka-correlation");
-                });
+                assertAll(
+                        () -> assertThat(persistedSearch.get()).isNotNull(),
+                        () -> assertThat(consumerCorrelation.get()).isEqualTo("http-to-kafka-correlation"),
+                        () -> assertThat(consumerThread.get().isVirtual()).isTrue(),
+                        () -> assertThat(logs.events()).anySatisfy(event -> {
+                    assertAll(
+                            () -> assertThat(event.getFormattedMessage()).contains("Kafka message persisted:"),
+                            () -> assertThat(event.getMDCPropertyMap()).containsEntry(CorrelationId.MDC_KEY, "http-to-kafka-correlation"));
+                }));
             });
             var end = KafkaTestUtils.getEndOffsets(dltConsumer, TEST_TOPIC, 0).values().iterator().next();
             lastSent = new RecordMetadata(new org.apache.kafka.common.TopicPartition(TEST_TOPIC, 0), end - 1, 0, 0, 0, 0);
             String id = persistedSearch.get().searchId();
-            assertThat(id).isNotEqualTo("http-to-kafka-correlation");
-            assertThat(result.getResponse().getContentAsString()).contains(id);
-            assertThat(logs.events()).anySatisfy(event -> {
-                assertThat(event.getFormattedMessage()).contains("HTTP response:", id);
-                assertThat(event.getMDCPropertyMap()).containsEntry(CorrelationId.MDC_KEY, "http-to-kafka-correlation");
+            assertAll(
+                    () -> assertThat(id).isNotEqualTo("http-to-kafka-correlation"),
+                    () -> assertThat(result.getResponse().getContentAsString()).contains(id),
+                    () -> assertThat(logs.events()).anySatisfy(event -> {
+                assertAll(
+                        () -> assertThat(event.getFormattedMessage()).contains("HTTP response:", id),
+                        () -> assertThat(event.getMDCPropertyMap()).containsEntry(CorrelationId.MDC_KEY, "http-to-kafka-correlation"));
             }).anySatisfy(event -> {
-                assertThat(event.getFormattedMessage()).contains("Kafka publication confirmed:", id);
-                assertThat(event.getMDCPropertyMap()).containsEntry(CorrelationId.MDC_KEY, "http-to-kafka-correlation");
-            });
+                assertAll(
+                        () -> assertThat(event.getFormattedMessage()).contains("Kafka publication confirmed:", id),
+                        () -> assertThat(event.getMDCPropertyMap()).containsEntry(CorrelationId.MDC_KEY, "http-to-kafka-correlation"));
+            }));
         }
     }
 
     @Test
     void invalidDateShouldBeSentToDltWithoutRetries() throws Exception {
         var message = new SearchKafkaMessage(
-                "search-invalid", "hotel-1", "not-a-date", "2023-12-31", List.of(30));
+                "search-invalid", "hotel-1", "not-a-date", "2030-12-31", List.of(30));
 
-        var record = new ProducerRecord<String, Object>(TEST_TOPIC, "search-invalid", message);
-        record.headers().add(CorrelationId.HEADER, "invalid-message-correlation".getBytes(StandardCharsets.UTF_8));
-        send(record);
+        var consumerRecord = new ProducerRecord<String, Object>(TEST_TOPIC, "search-invalid", message);
+        consumerRecord.headers().add(CorrelationId.HEADER, "invalid-message-correlation".getBytes(StandardCharsets.UTF_8));
+        send(consumerRecord);
 
         var recovered = dltRecord("search-invalid");
-        assertThat(new String(recovered.value(), StandardCharsets.UTF_8)).contains("not-a-date", "search-invalid");
-        assertThat(new String(recovered.headers().lastHeader(CorrelationId.HEADER).value(), StandardCharsets.UTF_8))
-                .isEqualTo("invalid-message-correlation");
+        assertAll(
+                () -> assertThat(new String(recovered.value(), StandardCharsets.UTF_8)).contains("not-a-date", "search-invalid"),
+                () -> assertThat(new String(recovered.headers().lastHeader(CorrelationId.HEADER).value(), StandardCharsets.UTF_8))
+                .isEqualTo("invalid-message-correlation"));
         Mockito.verifyNoInteractions(searchRepositoryPort);
     }
 
     @Test
     void nullFieldsShouldBeSentToDltWithoutRetries() throws Exception {
         var message = new SearchKafkaMessage(
-                null, "hotel-1", "2023-12-29", "2023-12-31", List.of(30));
+                null, "hotel-1", "2030-12-29", "2030-12-31", List.of(30));
 
         send(new ProducerRecord<>(TEST_TOPIC, "null-field", message));
 
         var recovered = dltRecord("null-field");
-        assertThat(new String(recovered.value(), StandardCharsets.UTF_8)).contains("\"searchId\":null");
-        Mockito.verifyNoInteractions(searchRepositoryPort);
+        assertAll(
+                () -> assertThat(new String(recovered.value(), StandardCharsets.UTF_8)).contains("\"searchId\":null"),
+                () -> Mockito.verifyNoInteractions(searchRepositoryPort));
     }
 
     @Test
@@ -217,7 +240,7 @@ class KafkaIntegrationTest {
         var correlations = new CopyOnWriteArrayList<String>();
         var attempts = new CopyOnWriteArrayList<Long>();
         doAnswer(invocation -> {
-            attempts.add(System.nanoTime());
+            attempts.add(System.currentTimeMillis());
             correlations.add(MDC.get(CorrelationId.MDC_KEY));
             if (callCount.incrementAndGet() <= 2) {
                 throw new RuntimeException("Oracle temporarily unavailable");
@@ -226,18 +249,19 @@ class KafkaIntegrationTest {
         }).when(searchRepositoryPort).save(any(HotelSearch.class));
 
         var message = new SearchKafkaMessage(
-                "search-retry", "hotel-1", "2023-12-29", "2023-12-31", List.of(25));
+                "search-retry", "hotel-1", "2030-12-29", "2030-12-31", List.of(25));
 
-        var record = new ProducerRecord<String, Object>(TEST_TOPIC, "search-retry", message);
-        record.headers().add(CorrelationId.HEADER, "retry-correlation".getBytes(StandardCharsets.UTF_8));
-        send(record);
+        var consumerRecord = new ProducerRecord<String, Object>(TEST_TOPIC, "search-retry", message);
+        consumerRecord.headers().add(CorrelationId.HEADER, "retry-correlation".getBytes(StandardCharsets.UTF_8));
+        send(consumerRecord);
 
         awaitCommitted();
         verify(searchRepositoryPort, Mockito.times(3)).save(any(HotelSearch.class));
-        assertThat(callCount.get()).isEqualTo(3);
-        assertThat(correlations).containsExactly("retry-correlation", "retry-correlation", "retry-correlation");
-        assertThat(Duration.ofNanos(attempts.get(1) - attempts.get(0))).isGreaterThanOrEqualTo(Duration.ofSeconds(1));
-        assertThat(Duration.ofNanos(attempts.get(2) - attempts.get(1))).isGreaterThanOrEqualTo(Duration.ofSeconds(1));
+        assertAll(
+                () -> assertThat(callCount.get()).isEqualTo(3),
+                () -> assertThat(correlations).containsExactly("retry-correlation", "retry-correlation", "retry-correlation"),
+                () -> assertThat(Duration.ofMillis(attempts.get(1) - attempts.get(0))).isGreaterThanOrEqualTo(Duration.ofSeconds(1)),
+                () -> assertThat(Duration.ofMillis(attempts.get(2) - attempts.get(1))).isGreaterThanOrEqualTo(Duration.ofSeconds(1)));
     }
 
     @Test
@@ -249,12 +273,13 @@ class KafkaIntegrationTest {
         }).when(searchRepositoryPort).save(any(HotelSearch.class));
 
         var message = new SearchKafkaMessage(
-                "vt-test", "hotel-1", "2023-12-29", "2023-12-31", List.of(30));
+                "vt-test", "hotel-1", "2030-12-29", "2030-12-31", List.of(30));
         send(new ProducerRecord<>(TEST_TOPIC, "vt-test", message));
 
         verify(searchRepositoryPort, timeout(10_000)).save(any(HotelSearch.class));
-        assertThat(threadRef.get()).isNotNull();
-        assertThat(threadRef.get().isVirtual()).isTrue();
+        assertAll(
+                () -> assertThat(threadRef.get()).isNotNull(),
+                () -> assertThat(threadRef.get().isVirtual()).isTrue());
     }
 
     @Test
@@ -262,7 +287,7 @@ class KafkaIntegrationTest {
         doNothing().when(searchRepositoryPort).save(any(HotelSearch.class));
 
         var message = new SearchKafkaMessage(
-                "order-test", "hotel-1", "2023-12-29", "2023-12-31", List.of(5, 5, 30, 1));
+                "order-test", "hotel-1", "2030-12-29", "2030-12-31", List.of(5, 5, 30, 1));
         send(new ProducerRecord<>(TEST_TOPIC, "order-test", message));
 
         var captor = ArgumentCaptor.forClass(HotelSearch.class);
@@ -282,18 +307,19 @@ class KafkaIntegrationTest {
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
         String key = "bad-" + UUID.randomUUID();
-        var record = new ProducerRecord<>(TEST_TOPIC, key, original);
-        record.headers().add(CorrelationId.HEADER, "deserialization-correlation".getBytes(StandardCharsets.UTF_8));
+        var consumerRecord = new ProducerRecord<>(TEST_TOPIC, key, original);
+        consumerRecord.headers().add(CorrelationId.HEADER, "deserialization-correlation".getBytes(StandardCharsets.UTF_8));
         var factory = new DefaultKafkaProducerFactory<String, byte[]>(props);
         try (var producer = factory.createProducer()) {
-            lastSent = producer.send(record).get(10, TimeUnit.SECONDS);
+            lastSent = producer.send(consumerRecord).get(10, TimeUnit.SECONDS);
         } finally {
             factory.destroy();
         }
         var recovered = dltRecord(key);
-        assertThat(recovered.value()).containsExactly(original);
-        assertThat(new String(recovered.headers().lastHeader(CorrelationId.HEADER).value(), StandardCharsets.UTF_8))
-                .isEqualTo("deserialization-correlation");
+        assertAll(
+                () -> assertThat(recovered.value()).containsExactly(original),
+                () -> assertThat(new String(recovered.headers().lastHeader(CorrelationId.HEADER).value(), StandardCharsets.UTF_8))
+                .isEqualTo("deserialization-correlation"));
         Mockito.verifyNoInteractions(searchRepositoryPort);
     }
 
@@ -309,16 +335,16 @@ class KafkaIntegrationTest {
         verify(searchRepositoryPort).save(ArgumentMatchers.argThat(search -> search.searchId().equals("after-null")));
     }
 
-    private void send(ProducerRecord<String, Object> record) throws Exception {
-        lastSent = kafkaTemplate.send(record).get(10, TimeUnit.SECONDS).getRecordMetadata();
+    private void send(ProducerRecord<String, Object> consumerRecord) throws Exception {
+        lastSent = kafkaTemplate.send(consumerRecord).get(10, TimeUnit.SECONDS).getRecordMetadata();
     }
 
     private ConsumerRecord<String, byte[]> dltRecord(String key) {
         var found = new AtomicReference<ConsumerRecord<String, byte[]>>();
         await().atMost(Duration.ofSeconds(15)).until(() -> {
-            for (var record : dltConsumer.poll(Duration.ofMillis(200))) {
-                if (key.equals(record.key())) {
-                    found.set(record);
+            for (var consumerRecord : dltConsumer.poll(Duration.ofMillis(200))) {
+                if (key.equals(consumerRecord.key())) {
+                    found.set(consumerRecord);
                 }
             }
             return found.get() != null;
@@ -336,5 +362,59 @@ class KafkaIntegrationTest {
             assertThat(offset).isNotNull();
             assertThat(offset.offset()).isGreaterThan(lastSent.offset());
         });
+    }
+
+    @Test
+    void batchAcknowledgmentShouldNotCommitWhilePersistenceIsBlocked() throws Exception {
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        doAnswer(inv -> {
+            entered.countDown();
+            if (!release.await(10, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Persistence was not released");
+            }
+            return null;
+        }).when(searchRepositoryPort).save(any());
+        try {
+            var message = new SearchKafkaMessage("blocked-id", "hotel", "2030-12-29", "2030-12-31", List.of(30));
+            send(new ProducerRecord<>(TEST_TOPIC, message.searchId(), message));
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            await().during(Duration.ofMillis(300)).atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
+                var offset = KafkaTestUtils.getCurrentOffset(embeddedKafka.getBrokersAsString(),
+                        "kafka-integration", lastSent.topic(), lastSent.partition());
+                if (offset != null) {
+                    assertThat(offset.offset()).isLessThanOrEqualTo(lastSent.offset());
+                }
+            });
+        } finally {
+            release.countDown();
+        }
+        awaitCommitted();
+        verify(searchRepositoryPort).save(any());
+    }
+
+    @Test
+    void duplicatePrimaryKeyShouldCommitWithoutRetryOrDltEvenWithDifferentPayload() throws Exception {
+        var repository = Mockito.mock(com.sling.hotel.infrastructure.adapter.out.persistence.repository.SearchJpaRepository.class);
+        var adapter = new com.sling.hotel.infrastructure.adapter.out.persistence.SearchPersistenceAdapter(repository);
+        Mockito.when(repository.insertSearch(any(), any(), any(), any(), any()))
+                .thenReturn(1)
+                .thenThrow(new org.springframework.dao.DataIntegrityViolationException("duplicate",
+                        new java.sql.SQLException("ORA-00001 (HOTEL.PK_HOTEL_SEARCH)", "23000", 1)));
+        doAnswer(inv -> {
+            adapter.save(inv.getArgument(0));
+            return null;
+        }).when(searchRepositoryPort).save(any());
+        var original = new SearchKafkaMessage("redelivered-id", "hotel", "2030-12-29", "2030-12-31", List.of(30));
+        send(new ProducerRecord<>(TEST_TOPIC, original.searchId(), original));
+        awaitCommitted();
+        var changed = new SearchKafkaMessage(original.searchId(), "different-hotel", original.checkIn(), original.checkOut(), List.of(1));
+        send(new ProducerRecord<>(TEST_TOPIC, changed.searchId(), changed));
+        awaitCommitted();
+        assertAll(
+                () -> verify(searchRepositoryPort, Mockito.times(2)).save(any()),
+                () -> verify(repository, Mockito.times(2)).insertSearch(any(), any(), any(), any(), any()),
+                () -> Mockito.verifyNoMoreInteractions(repository),
+                () -> assertThat(dltConsumer.poll(Duration.ofSeconds(1)).isEmpty()).isTrue());
     }
 }

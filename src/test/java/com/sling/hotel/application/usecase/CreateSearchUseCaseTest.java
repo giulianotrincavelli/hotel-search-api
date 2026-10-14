@@ -13,6 +13,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.time.LocalDate;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -38,11 +39,12 @@ class CreateSearchUseCaseTest {
     void shouldGenerateSearchIdAndPublish() {
         HotelSearch result = useCase.create(COMMAND);
 
-        assertThat(result.searchId()).isNotBlank();
-        assertThat(result.hotelId()).isEqualTo("hotel-1");
-        assertThat(result.checkIn()).isEqualTo(LocalDate.of(2023, 12, 29));
-        assertThat(result.checkOut()).isEqualTo(LocalDate.of(2023, 12, 31));
-        assertThat(result.ages()).containsExactly(30, 29, 1, 3);
+        assertAll(
+                () -> assertThat(result.searchId()).isNotBlank(),
+                () -> assertThat(result.hotelId()).isEqualTo("hotel-1"),
+                () -> assertThat(result.checkIn()).isEqualTo(LocalDate.of(2023, 12, 29)),
+                () -> assertThat(result.checkOut()).isEqualTo(LocalDate.of(2023, 12, 31)),
+                () -> assertThat(result.ages()).containsExactly(30, 29, 1, 3));
 
         var captor = ArgumentCaptor.forClass(HotelSearch.class);
         verify(searchPublisher).publish(captor.capture());

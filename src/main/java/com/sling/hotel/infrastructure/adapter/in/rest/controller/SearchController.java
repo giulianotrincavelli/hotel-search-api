@@ -42,7 +42,7 @@ public class SearchController {
             description = "Validates the search, generates a unique searchId, and publishes it to Kafka for asynchronous persistence. "
                     + "The search may not be immediately available via GET /count due to asynchronous processing.",
             responses = {
-                    @ApiResponse(responseCode = "200", description = "Search registered successfully"),
+                    @ApiResponse(responseCode = "202", description = "Search accepted for asynchronous persistence"),
                     @ApiResponse(responseCode = "400", description = "Invalid request",
                             content = @Content(schema = @Schema(implementation = ErrorResponse.class))),
                     @ApiResponse(responseCode = "503", description = "Kafka unavailable",
@@ -51,7 +51,7 @@ public class SearchController {
     )
     public ResponseEntity<SearchResponse> createSearch(@Valid @RequestBody SearchRequest request) {
         HotelSearch created = createSearchPort.create(SearchRequestMapper.toInput(request));
-        return ResponseEntity.ok(new SearchResponse(created.searchId()));
+        return ResponseEntity.accepted().body(new SearchResponse(created.searchId()));
     }
 
     @GetMapping("/count")

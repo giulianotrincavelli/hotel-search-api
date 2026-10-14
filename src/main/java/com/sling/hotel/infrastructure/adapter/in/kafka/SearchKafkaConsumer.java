@@ -25,26 +25,25 @@ public class SearchKafkaConsumer {
     }
 
     @KafkaListener(topics = "${hotel-search.kafka.topic}")
-    public void consume(ConsumerRecord<String, SearchKafkaMessage> record) {
-        SearchKafkaMessage message = record.value();
-        String correlationId = CorrelationId.fromHeaders(record.headers());
+    public void consume(ConsumerRecord<String, SearchKafkaMessage> kafkaRecord) {
+        SearchKafkaMessage message = kafkaRecord.value();
+        String correlationId = CorrelationId.fromHeaders(kafkaRecord.headers());
         MDC.put(CorrelationId.MDC_KEY, correlationId);
         try {
             if (message == null) {
                 throw new InvalidKafkaMessageException("Kafka message value must not be null", null);
             }
             String searchId = message.searchId();
-            log.debug("Kafka message received: searchId={} correlationId={} topic={} partition={} offset={} message={}",
-                    searchId, correlationId, record.topic(), record.partition(), record.offset(), message);
+            if (log.isDebugEnabled()) {
+                log.debug("Kafka message received: searchId={} correlationId={} topic={} partition={} offset={} message={}",
+                        searchId, correlationId, kafkaRecord.topic(), kafkaRecord.partition(), kafkaRecord.offset(), message);
+            }
             HotelSearch search = toDomain(message);
             saveSearchPort.save(search);
-            log.debug("Kafka message persisted: searchId={} correlationId={} topic={} partition={} offset={}",
-                    search.searchId(), correlationId, record.topic(), record.partition(), record.offset());
-        } catch (RuntimeException e) {
-            log.error("Kafka processing failed: searchId={} correlationId={} topic={} partition={} offset={}",
-                    message == null ? record.key() : message.searchId(), correlationId,
-                    record.topic(), record.partition(), record.offset(), e);
-            throw e;
+            if (log.isDebugEnabled()) {
+                log.debug("Kafka message persisted: searchId={} correlationId={} topic={} partition={} offset={}",
+                        search.searchId(), correlationId, kafkaRecord.topic(), kafkaRecord.partition(), kafkaRecord.offset());
+            }
         } finally {
             MDC.remove(CorrelationId.MDC_KEY);
         }

@@ -36,8 +36,8 @@ class CountSearchUseCaseTest {
 
     @Test
     void shouldReturnSearchAndCount() {
-        when(searchRepository.findById("search-1")).thenReturn(Optional.of(SEARCH));
-        when(searchRepository.countIdentical(SEARCH)).thenReturn(5L);
+        when(searchRepository.findWithCount("search-1"))
+                .thenReturn(Optional.of(new SearchRepositoryPort.SearchCount(SEARCH, 5L)));
 
         CountSearchPort.Result result = useCase.count("search-1");
 
@@ -49,7 +49,7 @@ class CountSearchUseCaseTest {
 
     @Test
     void shouldThrowWhenSearchNotFound() {
-        when(searchRepository.findById("missing")).thenReturn(Optional.empty());
+        when(searchRepository.findWithCount("missing")).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> useCase.count("missing"))
                 .isInstanceOf(SearchNotFoundException.class)
@@ -58,7 +58,7 @@ class CountSearchUseCaseTest {
 
     @Test
     void shouldPropagateRepositoryError() {
-        when(searchRepository.findById("search-1")).thenThrow(new RuntimeException("DB error"));
+        when(searchRepository.findWithCount("search-1")).thenThrow(new RuntimeException("DB error"));
 
         assertThatThrownBy(() -> useCase.count("search-1"))
                 .isInstanceOf(RuntimeException.class)

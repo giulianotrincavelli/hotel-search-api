@@ -1,6 +1,7 @@
 package com.sling.hotel.infrastructure.adapter.in.rest.dto.request;
 
 import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.FutureOrPresent;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
@@ -22,11 +23,13 @@ public record SearchRequest(
         String hotelId,
 
         @NotNull(message = "checkIn is required")
-        @Schema(description = "Check-in date in dd/MM/yyyy format", example = "29/12/2023")
+        @FutureOrPresent(message = "checkIn must not be in the past")
+        @Schema(description = "Check-in date in dd/MM/yyyy format", example = "29/12/2026")
         LocalDate checkIn,
 
         @NotNull(message = "checkOut is required")
-        @Schema(description = "Check-out date in dd/MM/yyyy format", example = "31/12/2023")
+        @FutureOrPresent(message = "checkOut must not be in the past")
+        @Schema(description = "Check-out date in dd/MM/yyyy format", example = "31/12/2026")
         LocalDate checkOut,
 
         @NotEmpty(message = "ages is required and must not be empty")

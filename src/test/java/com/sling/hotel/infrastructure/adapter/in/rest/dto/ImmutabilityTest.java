@@ -11,6 +11,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertAll;
 
 class ImmutabilityTest {
 
@@ -31,7 +32,8 @@ class ImmutabilityTest {
     void searchRequest_agesUnmodifiable() {
         var request = new SearchRequest("hotel-1", CHECK_IN, CHECK_OUT, List.of(30, 29));
 
-        assertThatThrownBy(() -> request.ages().add(99))
+        var ages = request.ages();
+        assertThatThrownBy(() -> ages.add(99))
                 .isInstanceOf(UnsupportedOperationException.class);
     }
 
@@ -49,7 +51,8 @@ class ImmutabilityTest {
     void countResponseSearchDetail_agesUnmodifiable() {
         var detail = new CountResponse.SearchDetail("hotel-1", CHECK_IN, CHECK_OUT, List.of(30, 29));
 
-        assertThatThrownBy(() -> detail.ages().add(99))
+        var ages = detail.ages();
+        assertThatThrownBy(() -> ages.add(99))
                 .isInstanceOf(UnsupportedOperationException.class);
     }
 
@@ -76,13 +79,16 @@ class ImmutabilityTest {
 
         assertThat(detail.ages()).isNull();
     }
+
     @Test
     void errorResponseShouldCopyErrorsAndExposeAnUnmodifiableList() {
         var errors = new ArrayList<>(List.of("Invalid hotelId"));
         var response = new ErrorResponse(400, "Validation failed", errors);
         errors.clear();
-        assertThat(response.errors()).containsExactly("Invalid hotelId");
-        assertThatThrownBy(() -> response.errors().add("other"))
-                .isInstanceOf(UnsupportedOperationException.class);
+        var exposedErrors = response.errors();
+        assertAll(
+                () -> assertThat(response.errors()).containsExactly("Invalid hotelId"),
+                () -> assertThatThrownBy(() -> exposedErrors.add("other"))
+                        .isInstanceOf(UnsupportedOperationException.class));
     }
 }

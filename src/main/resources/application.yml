@@ -40,6 +40,7 @@ spring:
     consumer:
       group-id: ${KAFKA_CONSUMER_GROUP_ID:hotel-search-group}
       auto-offset-reset: ${KAFKA_CONSUMER_AUTO_OFFSET_RESET:earliest}
+      enable-auto-commit: false
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
       properties:
@@ -47,8 +48,8 @@ spring:
         spring.json.trusted.packages: com.sling.hotel.infrastructure.messaging.kafka.model
         spring.json.value.default.type: com.sling.hotel.infrastructure.messaging.kafka.model.SearchKafkaMessage
     listener:
-      ack-mode: record
-      concurrency: ${KAFKA_LISTENER_CONCURRENCY:1}
+      ack-mode: ${KAFKA_ACK_MODE:batch}
+      concurrency: ${KAFKA_LISTENER_CONCURRENCY:6}
 
   jackson:
     deserialization:
@@ -60,6 +61,7 @@ server:
 hotel-search:
   kafka:
     topic: ${KAFKA_TOPIC:hotel_availability_searches}
+    partitions: ${KAFKA_PARTITIONS:6}
     dlt-suffix: ${KAFKA_DLT_SUFFIX:.DLT}
     retry:
       interval: ${KAFKA_RETRY_INTERVAL:5s}
@@ -77,3 +79,12 @@ logging:
     com.sling.hotel: ${LOG_LEVEL_APP:INFO}
     org.apache.kafka: ${LOG_LEVEL_KAFKA:WARN}
     org.hibernate.SQL: ${LOG_LEVEL_HIBERNATE_SQL:WARN}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics
+  endpoint:
+    health:
+      show-details: never

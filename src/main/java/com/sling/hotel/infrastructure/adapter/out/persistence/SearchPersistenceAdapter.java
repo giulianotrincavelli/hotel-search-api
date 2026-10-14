@@ -1,7 +1,6 @@
 package com.sling.hotel.infrastructure.adapter.out.persistence;
 
 import com.sling.hotel.application.ports.out.SearchRepositoryPort;
-import com.sling.hotel.domain.exception.IdempotencyConflictException;
 import com.sling.hotel.domain.model.HotelSearch;
 import com.sling.hotel.infrastructure.adapter.out.persistence.mapper.SearchEntityMapper;
 import com.sling.hotel.infrastructure.adapter.out.persistence.repository.SearchJpaRepository;
@@ -30,56 +29,30 @@ public class SearchPersistenceAdapter implements SearchRepositoryPort {
 
     @Override
     public void save(HotelSearch search) {
-        int rowsAffected;
         try {
-            rowsAffected = jpaRepository.mergeSearch(
-                    search.searchId(),
-                    search.hotelId(),
-                    search.checkIn(),
-                    search.checkOut(),
-                    SearchEntityMapper.agesToString(search.ages())
-            );
+            jpaRepository.insertSearch(
+                    search.searchId(), search.hotelId(), search.checkIn(), search.checkOut(),
+                    SearchEntityMapper.agesToString(search.ages()));
         } catch (DataIntegrityViolationException e) {
-            if (isPkDuplicate(e)) {
-                verifyWinner(search);
-                return;
+            if (!isPkDuplicate(e)) {
+                throw e;
             }
-            throw e;
+            if (log.isDebugEnabled()) {
+                log.debug("Duplicate searchId ignored: searchId={}", search.searchId());
+            }
+            return;
         }
-
-        if (rowsAffected == 0) {
-            verifyWinner(search);
-        } else {
+        if (log.isDebugEnabled()) {
             log.debug("Search inserted: searchId={}", search.searchId());
         }
     }
 
     @Override
-    public Optional<HotelSearch> findById(String searchId) {
-        return jpaRepository.findById(searchId)
-                .map(SearchEntityMapper::toDomain);
-    }
-
-    @Override
-    public long countIdentical(HotelSearch search) {
-        return jpaRepository.countByIdentity(
-                search.hotelId(),
-                search.checkIn(),
-                search.checkOut(),
-                SearchEntityMapper.agesToString(search.ages())
-        );
-    }
-
-    private void verifyWinner(HotelSearch incoming) {
-        var existing = jpaRepository.findById(incoming.searchId())
-                .map(SearchEntityMapper::toDomain);
-
-        if (existing.isPresent() && existing.get().equals(incoming)) {
-            log.debug("Idempotent duplicate ignored: searchId={}", incoming.searchId());
-        } else {
-            log.debug("Idempotency conflict: searchId={} has different payload in database", incoming.searchId());
-            throw new IdempotencyConflictException(incoming.searchId());
-        }
+    public Optional<SearchCount> findWithCount(String searchId) {
+        return jpaRepository.findWithCount(searchId)
+                .map(row -> new SearchCount(new HotelSearch(
+                        row.searchId(), row.hotelId(), row.checkIn(), row.checkOut(),
+                        SearchEntityMapper.stringToAges(row.ages())), row.count()));
     }
 
     private static boolean isPkDuplicate(DataIntegrityViolationException e) {
@@ -93,15 +66,18 @@ public class SearchPersistenceAdapter implements SearchRepositoryPort {
             }
             if (cause instanceof SQLException sql && sql.getErrorCode() == 1) {
                 duplicate = true;
-                if (sql.getMessage() != null) {
-                    var matcher = ORACLE_CONSTRAINT.matcher(sql.getMessage());
-                    if (matcher.find()) {
-                        pkInMessage |= isPkConstraint(matcher.group(1));
-                    }
-                }
+                pkInMessage |= messageNamesPk(sql.getMessage());
             }
         }
         return duplicate && (constraintName != null ? isPkConstraint(constraintName) : pkInMessage);
+    }
+
+    private static boolean messageNamesPk(String message) {
+        if (message == null) {
+            return false;
+        }
+        var matcher = ORACLE_CONSTRAINT.matcher(message);
+        return matcher.find() && isPkConstraint(matcher.group(1));
     }
 
     private static boolean isPkConstraint(String constraintName) {

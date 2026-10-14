@@ -37,7 +37,7 @@ curl --silent --show-error -i \
   http://localhost:8080/search
 ```
 
-HTTP 200 after Kafka confirms publication. Example response:
+HTTP 202 Accepted after Kafka confirms publication. Example response:
 
 ```json
 {"searchId":"550e8400-e29b-41d4-a716-446655440000"}
@@ -64,7 +64,7 @@ HTTP 200 once persisted; this example has one matching search:
 
 GET returns 404 for an unknown or pending search. Retry briefly after POST. Two identical POST requests produce different IDs and count as two matches once persisted.
 
-Invalid requests return 400, handled Kafka infrastructure failures 503, and internal errors 500.
+Invalid requests return 400, Kafka infrastructure failures 503, and internal errors 500.
 
 ## Tests
 
@@ -89,3 +89,20 @@ docker run --rm -v "$PWD:$PWD" -w "$PWD" \
 ```
 
 See [full-suite Docker commands](docs/TECHNICAL.md#tests-and-coverage) and [technical documentation](docs/TECHNICAL.md) for architecture, persistence, logging, and benchmark results.
+
+## Performance
+
+With the API running, execute 10,000 complete POST/GET iterations with 200 VUs:
+
+```sh
+RUN_ID="k6-$(date -u +%Y%m%d%H%M%S)-$$"
+docker run --rm -i \
+  --network "container:$(docker compose ps -q app)" \
+  -e BASE_URL=http://localhost:8080 -e RUN_ID="$RUN_ID" \
+  -e VUS=200 -e ITERATIONS=10000 -e MEASURE_VISIBILITY=true \
+  grafana/k6:1.0.0 run - < scripts/search-load.js
+```
+
+GET polling waits up to 500 ms after each 404. Use a fresh `RUN_ID`; the payload dates must not be in the past. See [benchmark results and Oracle verification](docs/TECHNICAL.md#benchmark-and-monitoring).
+
+Actuator exposes health and metrics at `/actuator/health` and `/actuator/metrics`.

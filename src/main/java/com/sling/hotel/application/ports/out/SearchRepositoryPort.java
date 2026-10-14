@@ -8,7 +8,8 @@ public interface SearchRepositoryPort {
 
     void save(HotelSearch search);
 
-    Optional<HotelSearch> findById(String searchId);
+    Optional<SearchCount> findWithCount(String searchId);
 
-    long countIdentical(HotelSearch search);
+    record SearchCount(HotelSearch search, long count) {
+    }
 }

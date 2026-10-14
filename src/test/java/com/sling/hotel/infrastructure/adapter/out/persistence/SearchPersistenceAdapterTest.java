@@ -1,8 +1,6 @@
 package com.sling.hotel.infrastructure.adapter.out.persistence;
 
-import com.sling.hotel.domain.exception.IdempotencyConflictException;
 import com.sling.hotel.domain.model.HotelSearch;
-import com.sling.hotel.infrastructure.adapter.out.persistence.entity.SearchEntity;
 import com.sling.hotel.infrastructure.adapter.out.persistence.repository.SearchJpaRepository;
 import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.Test;
@@ -42,28 +40,22 @@ class SearchPersistenceAdapterTest {
             List.of(30, 29, 1, 3)
     );
 
-    private static final SearchEntity SEARCH_ENTITY = new SearchEntity(
-            "search-1", "hotel-1",
-            LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31),
-            "30,29,1,3"
-    );
-
     @Test
     void newSearchIdShouldInsert() {
-        when(jpaRepository.mergeSearch("search-1", "hotel-1",
+        when(jpaRepository.insertSearch("search-1", "hotel-1",
                 LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31), "30,29,1,3"))
                 .thenReturn(1);
 
-        assertDoesNotThrow(() -> adapter.save(SEARCH));
-
-        verify(jpaRepository).mergeSearch("search-1", "hotel-1",
-                LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31), "30,29,1,3");
-        verify(jpaRepository, never()).findById(any());
+        assertAll(
+                () -> assertDoesNotThrow(() -> adapter.save(SEARCH)),
+                () -> verify(jpaRepository).insertSearch("search-1", "hotel-1",
+                        LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31), "30,29,1,3"),
+                () -> verify(jpaRepository, never()).findById(any()));
     }
 
     @Test
     void shouldNotCallExistsByIdOnSave() {
-        when(jpaRepository.mergeSearch(any(), any(), any(), any(), any())).thenReturn(1);
+        when(jpaRepository.insertSearch(any(), any(), any(), any(), any())).thenReturn(1);
 
         adapter.save(SEARCH);
 
@@ -71,77 +63,20 @@ class SearchPersistenceAdapterTest {
     }
 
     @Test
-    void sameSearchIdSamePayloadShouldBeIdempotent() {
-        when(jpaRepository.mergeSearch(any(), any(), any(), any(), any())).thenReturn(0);
-        when(jpaRepository.findById("search-1")).thenReturn(Optional.of(SEARCH_ENTITY));
-
-        assertDoesNotThrow(() -> adapter.save(SEARCH));
-    }
-
-    @Test
-    void sameSearchIdDifferentPayloadShouldThrowConflict() {
-        when(jpaRepository.mergeSearch(any(), any(), any(), any(), any())).thenReturn(0);
-
-        var differentEntity = new SearchEntity(
-                "search-1", "hotel-DIFFERENT",
-                LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31),
-                "30,29,1,3"
-        );
-        when(jpaRepository.findById("search-1")).thenReturn(Optional.of(differentEntity));
-
-        assertThatThrownBy(() -> adapter.save(SEARCH))
-                .isInstanceOf(IdempotencyConflictException.class)
-                .hasMessageContaining("search-1");
-    }
-
-    @Test
-    void sameSearchIdDifferentAgesShouldThrowConflict() {
-        when(jpaRepository.mergeSearch(any(), any(), any(), any(), any())).thenReturn(0);
-
-        var differentAgesEntity = new SearchEntity(
-                "search-1", "hotel-1",
-                LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31),
-                "1,2,3,4"
-        );
-        when(jpaRepository.findById("search-1")).thenReturn(Optional.of(differentAgesEntity));
-
-        assertThatThrownBy(() -> adapter.save(SEARCH))
-                .isInstanceOf(IdempotencyConflictException.class);
-    }
-
-    @Test
     void concurrentPkDuplicateWithSamePayloadShouldBeIdempotent() {
         var oraError = new SQLIntegrityConstraintViolationException(
                 "ORA-00001: unique constraint (TESTUSER.PK_HOTEL_SEARCH) violated", "23000", 1);
-        when(jpaRepository.mergeSearch(any(), any(), any(), any(), any()))
+        when(jpaRepository.insertSearch(any(), any(), any(), any(), any()))
                 .thenThrow(new DataIntegrityViolationException("dup", oraError));
-        when(jpaRepository.findById("search-1")).thenReturn(Optional.of(SEARCH_ENTITY));
-
-        assertDoesNotThrow(() -> adapter.save(SEARCH));
-    }
-
-    @Test
-    void concurrentPkDuplicateWithDifferentPayloadShouldThrowConflict() {
-        var oraError = new SQLIntegrityConstraintViolationException(
-                "ORA-00001: unique constraint (TESTUSER.PK_HOTEL_SEARCH) violated", "23000", 1);
-        when(jpaRepository.mergeSearch(any(), any(), any(), any(), any()))
-                .thenThrow(new DataIntegrityViolationException("dup", oraError));
-
-        var differentEntity = new SearchEntity(
-                "search-1", "hotel-DIFFERENT",
-                LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31),
-                "30,29,1,3"
-        );
-        when(jpaRepository.findById("search-1")).thenReturn(Optional.of(differentEntity));
-
-        assertThatThrownBy(() -> adapter.save(SEARCH))
-                .isInstanceOf(IdempotencyConflictException.class);
+        assertAll(
+                () -> assertDoesNotThrow(() -> adapter.save(SEARCH)),
+                () -> verify(jpaRepository, never()).findById(any()));
     }
 
     @Test
     void nonPkIntegrityErrorShouldPropagate() {
         var oraError = new SQLIntegrityConstraintViolationException("ORA-02291", "23000", 2291);
-        when(jpaRepository.mergeSearch(any(), any(), any(), any(), any()))
+        when(jpaRepository.insertSearch(any(), any(), any(), any(), any()))
                 .thenThrow(new DataIntegrityViolationException("fk violation", oraError));
 
         assertThatThrownBy(() -> adapter.save(SEARCH))
@@ -152,7 +87,7 @@ class SearchPersistenceAdapterTest {
     void nonPkConstraintOra00001ShouldPropagate() {
         var oraError = new SQLIntegrityConstraintViolationException(
                 "ORA-00001: unique constraint (TESTUSER.OTHER_CONSTRAINT) violated", "23000", 1);
-        when(jpaRepository.mergeSearch(any(), any(), any(), any(), any()))
+        when(jpaRepository.insertSearch(any(), any(), any(), any(), any()))
                 .thenThrow(new DataIntegrityViolationException("other unique", oraError));
 
         assertThatThrownBy(() -> adapter.save(SEARCH))
@@ -160,100 +95,87 @@ class SearchPersistenceAdapterTest {
     }
 
     @Test
-    void shouldFindByIdAndMapToDomain() {
-        when(jpaRepository.findById("search-1")).thenReturn(Optional.of(SEARCH_ENTITY));
-
-        Optional<HotelSearch> result = adapter.findById("search-1");
-
-        assertThat(result).isPresent();
-        HotelSearch found = result.get();
-        assertAll(
-                () -> assertThat(found.searchId()).isEqualTo("search-1"),
-                () -> assertThat(found.hotelId()).isEqualTo("hotel-1"),
-                () -> assertThat(found.ages()).containsExactly(30, 29, 1, 3)
-        );
-    }
-
-    @Test
-    void shouldReturnEmptyWhenNotFound() {
-        when(jpaRepository.findById("missing")).thenReturn(Optional.empty());
-
-        assertThat(adapter.findById("missing")).isEmpty();
-    }
-
-    @Test
-    void shouldCountIdenticalSearches() {
-        when(jpaRepository.countByIdentity("hotel-1",
-                LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31),
-                "30,29,1,3"))
-                .thenReturn(5L);
-
-        assertThat(adapter.countIdentical(SEARCH)).isEqualTo(5L);
-    }
-
-    @Test
-    void shouldCountZeroWhenNoIdenticalSearches() {
-        when(jpaRepository.countByIdentity("hotel-1",
-                LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31),
-                "30,29,1,3"))
-                .thenReturn(0L);
-
-        assertThat(adapter.countIdentical(SEARCH)).isEqualTo(0L);
-    }
-
-    @Test
-    void shouldDistinguishDifferentAgeOrders() {
-        var search1 = new HotelSearch(
-                "s1", "hotel-1",
-                LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31),
-                List.of(30, 29, 1, 3)
-        );
-        var search2 = new HotelSearch(
-                "s2", "hotel-1",
-                LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31),
-                List.of(3, 29, 30, 1)
-        );
-
-        when(jpaRepository.countByIdentity("hotel-1",
-                LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31),
-                "30,29,1,3")).thenReturn(3L);
-        when(jpaRepository.countByIdentity("hotel-1",
-                LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31),
-                "3,29,30,1")).thenReturn(1L);
-
-        assertAll(
-                () -> assertThat(adapter.countIdentical(search1)).isEqualTo(3L),
-                () -> assertThat(adapter.countIdentical(search2)).isEqualTo(1L)
-        );
-    }
-    @Test
     void nestedSqlExceptionShouldBeDetectedEvenWhenItsOwnCauseIsMoreSpecific() {
         var sql = new SQLException("ORA-00001", "23000", 1,
                 new RuntimeException("Oracle driver detail"));
         var constraint = new ConstraintViolationException("duplicate", sql, "\"HOTEL\".\"PK_HOTEL_SEARCH\"");
-        var failure = new DataIntegrityViolationException("merge failed", new RuntimeException(constraint));
-        when(jpaRepository.mergeSearch(any(), any(), any(), any(), any())).thenThrow(failure);
-        when(jpaRepository.findById(SEARCH.searchId())).thenReturn(Optional.of(SEARCH_ENTITY));
-        assertDoesNotThrow(() -> adapter.save(SEARCH));
-        verify(jpaRepository).findById(SEARCH.searchId());
+        var failure = new DataIntegrityViolationException("insert failed", new RuntimeException(constraint));
+        when(jpaRepository.insertSearch(any(), any(), any(), any(), any())).thenThrow(failure);
+        assertAll(
+                () -> assertDoesNotThrow(() -> adapter.save(SEARCH)),
+                () -> verify(jpaRepository, never()).findById(any()));
     }
 
     @Test
     void reportedConstraintNameShouldTakePrecedenceOverSqlMessage() {
         var sql = new SQLException("ORA-00001 (HOTEL.PK_HOTEL_SEARCH)", "23000", 1);
         var constraint = new ConstraintViolationException("duplicate", sql, "OTHER_CONSTRAINT");
-        var failure = new DataIntegrityViolationException("merge failed", constraint);
-        when(jpaRepository.mergeSearch(any(), any(), any(), any(), any())).thenThrow(failure);
-        assertThatThrownBy(() -> adapter.save(SEARCH)).isSameAs(failure);
-        verify(jpaRepository, never()).findById(any());
+        var failure = new DataIntegrityViolationException("insert failed", constraint);
+        when(jpaRepository.insertSearch(any(), any(), any(), any(), any())).thenThrow(failure);
+        assertAll(
+                () -> assertThatThrownBy(() -> adapter.save(SEARCH)).isSameAs(failure),
+                () -> verify(jpaRepository, never()).findById(any()));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"hotel-1", "different-hotel"})
+    void pkDuplicateShouldBeIgnoredWithoutReadingOrComparingPayload(String hotelId) {
+        var incoming = new HotelSearch(SEARCH.searchId(), hotelId, SEARCH.checkIn(), SEARCH.checkOut(), List.of(1, 30));
+        var sql = new SQLException("ORA-00001 (HOTEL.PK_HOTEL_SEARCH)", "23000", 1);
+        when(jpaRepository.insertSearch(any(), any(), any(), any(), any()))
+                .thenThrow(new DataIntegrityViolationException("duplicate", sql));
+
+        assertAll(
+                () -> assertDoesNotThrow(() -> adapter.save(incoming)),
+                () -> verify(jpaRepository).insertSearch(incoming.searchId(), hotelId,
+                        incoming.checkIn(), incoming.checkOut(), "1,30"),
+                () -> org.mockito.Mockito.verifyNoMoreInteractions(jpaRepository));
     }
 
     @Test
-    void absentWinnerAfterPkDuplicateShouldReportConflict() {
-        var sql = new SQLException("ORA-00001 (HOTEL.PK_HOTEL_SEARCH)", "23000", 1);
-        var failure = new DataIntegrityViolationException("merge failed", sql);
-        when(jpaRepository.mergeSearch(any(), any(), any(), any(), any())).thenThrow(failure);
-        when(jpaRepository.findById(SEARCH.searchId())).thenReturn(Optional.empty());
-        assertThatThrownBy(() -> adapter.save(SEARCH)).isInstanceOf(IdempotencyConflictException.class);
+    void unclassifiedIntegrityViolationShouldNotBeIgnored() {
+        var failure = new DataIntegrityViolationException("Unknown constraint");
+        when(jpaRepository.insertSearch(any(), any(), any(), any(), any())).thenThrow(failure);
+
+        assertThatThrownBy(() -> adapter.save(SEARCH)).isSameAs(failure);
+    }
+
+    @Test
+    void oracleTransientFailureShouldPropagateUnchanged() {
+        var failure = new org.springframework.dao.TransientDataAccessResourceException("Connection lost");
+        when(jpaRepository.insertSearch(any(), any(), any(), any(), any())).thenThrow(failure);
+
+        assertAll(
+                () -> assertThatThrownBy(() -> adapter.save(SEARCH)).isSameAs(failure),
+                () -> verify(jpaRepository, never()).findById(any()));
+    }
+
+    @Test
+    void shouldFetchSearchAndExactCountInOneRepositoryCall() {
+        var row = new com.sling.hotel.infrastructure.adapter.out.persistence.repository.SearchCountRow(
+                SEARCH.searchId(), SEARCH.hotelId(), SEARCH.checkIn(), SEARCH.checkOut(), "30,29,1,3", 7);
+        when(jpaRepository.findWithCount(SEARCH.searchId())).thenReturn(Optional.of(row));
+
+        var result = adapter.findWithCount(SEARCH.searchId()).orElseThrow();
+
+        assertAll(
+                () -> assertThat(result.search()).isEqualTo(SEARCH),
+                () -> assertThat(result.count()).isEqualTo(7));
+        assertAll(
+                () -> verify(jpaRepository).findWithCount(SEARCH.searchId()),
+                () -> org.mockito.Mockito.verifyNoMoreInteractions(jpaRepository));
+    }
+
+    @Test
+    void lookupShouldReturnEmptyForMissingId() {
+        when(jpaRepository.findWithCount("missing")).thenReturn(Optional.empty());
+        assertThat(adapter.findWithCount("missing")).isEmpty();
+    }
+
+    @Test
+    void failedLookupShouldPropagateUnchanged() {
+        var failure = new org.springframework.dao.DataAccessResourceFailureException("Oracle unavailable");
+        when(jpaRepository.findWithCount("search-1")).thenThrow(failure);
+        assertThatThrownBy(() -> adapter.findWithCount("search-1")).isSameAs(failure);
     }
 }

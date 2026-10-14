@@ -41,32 +41,28 @@ public class SearchKafkaProducer implements SearchPublisherPort {
         var message = toMessage(search);
         String previous = MDC.get(CorrelationId.MDC_KEY);
         String correlationId = CorrelationId.resolve(previous);
-        var record = new ProducerRecord<String, Object>(topic, search.searchId(), message);
-        record.headers().add(CorrelationId.HEADER, correlationId.getBytes(StandardCharsets.UTF_8));
+        var producerRecord = new ProducerRecord<String, Object>(topic, search.searchId(), message);
+        producerRecord.headers().add(CorrelationId.HEADER, correlationId.getBytes(StandardCharsets.UTF_8));
         MDC.put(CorrelationId.MDC_KEY, correlationId);
         try {
-            var result = kafkaTemplate.send(record)
+            var result = kafkaTemplate.send(producerRecord)
                     .get(sendTimeout.toMillis(), TimeUnit.MILLISECONDS);
             var metadata = result.getRecordMetadata();
-            log.debug("Kafka publication confirmed: searchId={} correlationId={} topic={} partition={} offset={}",
-                    search.searchId(), correlationId, metadata.topic(), metadata.partition(), metadata.offset());
+            if (log.isDebugEnabled()) {
+                log.debug("Kafka publication confirmed: searchId={} correlationId={} topic={} partition={} offset={}",
+                        search.searchId(), correlationId, metadata.topic(), metadata.partition(), metadata.offset());
+            }
         } catch (ExecutionException e) {
-            log.error("Kafka publication failed: searchId={} correlationId={} topic={}",
-                    search.searchId(), correlationId, topic, e.getCause());
-            throw publicationFailure(e.getCause());
+            throw publicationFailure(e.getCause(), search.searchId(), correlationId);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            log.error("Kafka publication interrupted: searchId={} correlationId={} topic={}",
-                    search.searchId(), correlationId, topic, e);
-            throw new PublishException("Interrupted while publishing search to Kafka", e);
+            throw new PublishException(publicationContext("Interrupted while publishing search to Kafka",
+                    search.searchId(), correlationId), e);
         } catch (TimeoutException e) {
-            log.error("Kafka publication timed out: searchId={} correlationId={} topic={}",
-                    search.searchId(), correlationId, topic, e);
-            throw new PublishException("Timed out waiting for Kafka acknowledgment", e);
+            throw new PublishException(publicationContext("Timed out waiting for Kafka acknowledgment",
+                    search.searchId(), correlationId), e);
         } catch (RuntimeException e) {
-            log.error("Kafka publication failed: searchId={} correlationId={} topic={}",
-                    search.searchId(), correlationId, topic, e);
-            throw publicationFailure(e);
+            throw publicationFailure(e, search.searchId(), correlationId);
         } finally {
             MDC.remove(CorrelationId.MDC_KEY);
             if (previous != null) {
@@ -75,7 +71,7 @@ public class SearchKafkaProducer implements SearchPublisherPort {
         }
     }
 
-    private static RuntimeException publicationFailure(Throwable failure) {
+    private RuntimeException publicationFailure(Throwable failure, String searchId, String correlationId) {
         Throwable cause = failure;
         boolean kafkaFailure = false;
         while (true) {
@@ -91,12 +87,16 @@ public class SearchKafkaProducer implements SearchPublisherPort {
             cause = cause.getCause();
         }
         if (kafkaFailure) {
-            return new PublishException("Failed to publish search to Kafka", failure);
+            return new PublishException(publicationContext("Failed to publish search to Kafka", searchId, correlationId), failure);
         }
         if (cause instanceof RuntimeException runtimeException) {
             return runtimeException;
         }
-        return new IllegalStateException("Unexpected Kafka publication failure", failure);
+        return new IllegalStateException(publicationContext("Unexpected Kafka publication failure", searchId, correlationId), failure);
+    }
+
+    private String publicationContext(String message, String searchId, String correlationId) {
+        return message + ": searchId=" + searchId + " correlationId=" + correlationId + " topic=" + topic;
     }
 
     private static SearchKafkaMessage toMessage(HotelSearch search) {

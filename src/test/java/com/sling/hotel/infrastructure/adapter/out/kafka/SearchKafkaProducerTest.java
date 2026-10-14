@@ -72,18 +72,20 @@ class SearchKafkaProducerTest {
         try (var logs = new LogCapture(SearchKafkaProducer.class.getName())) {
             producer.publish(SEARCH);
             assertThat(logs.events()).anySatisfy(event -> {
-                assertThat(event.getFormattedMessage()).contains("searchId=search-1", "correlationId=client-correlation", "partition=0", "offset=0");
-                assertThat(event.getMDCPropertyMap()).containsEntry("correlationId", "client-correlation");
+                assertAll(
+                        () -> assertThat(event.getFormattedMessage()).contains("searchId=search-1", "correlationId=client-correlation", "partition=0", "offset=0"),
+                        () -> assertThat(event.getMDCPropertyMap()).containsEntry("correlationId", "client-correlation"));
             });
         }
 
-        var record = recordCaptor.getValue();
-        assertThat(record.topic()).isEqualTo(TOPIC);
-        assertThat(record.key()).isEqualTo("search-1");
-        assertThat(new String(record.headers().lastHeader(CorrelationId.HEADER).value(), StandardCharsets.UTF_8))
-                .isEqualTo("client-correlation");
-        assertThat(MDC.get(CorrelationId.MDC_KEY)).isEqualTo("client-correlation");
-        SearchKafkaMessage message = (SearchKafkaMessage) record.value();
+        var producerRecord = recordCaptor.getValue();
+        assertAll(
+                () -> assertThat(producerRecord.topic()).isEqualTo(TOPIC),
+                () -> assertThat(producerRecord.key()).isEqualTo("search-1"),
+                () -> assertThat(new String(producerRecord.headers().lastHeader(CorrelationId.HEADER).value(), StandardCharsets.UTF_8))
+                .isEqualTo("client-correlation"),
+                () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isEqualTo("client-correlation"));
+        SearchKafkaMessage message = (SearchKafkaMessage) producerRecord.value();
         assertAll(
                 () -> assertThat(message.searchId()).isEqualTo("search-1"),
                 () -> assertThat(message.hotelId()).isEqualTo("hotel-1"),
@@ -103,35 +105,38 @@ class SearchKafkaProducerTest {
         when(kafkaTemplate.send(ArgumentMatchers.<ProducerRecord<String, Object>>any()))
                 .thenReturn(future);
 
-        try (var logs = new LogCapture(SearchKafkaProducer.class.getName())) {
-            assertThatThrownBy(() -> producer.publish(SEARCH))
-                    .isInstanceOf(PublishException.class)
-                    .hasMessageContaining("Failed to publish");
-            assertThat(logs.events()).anySatisfy(event -> {
-                assertThat(event.getThrowableProxy()).isNotNull();
-                assertThat(event.getFormattedMessage()).contains("searchId=search-1", "topic=" + TOPIC);
-            });
-        }
-        assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
+        assertAll(
+                () -> assertThatThrownBy(() -> producer.publish(SEARCH))
+                .isInstanceOf(PublishException.class)
+                .hasCauseInstanceOf(TimeoutException.class)
+                .hasMessageContaining("Failed to publish")
+                .hasMessageContaining("searchId=search-1")
+                .hasMessageContaining("topic=" + TOPIC)
+                        .hasMessageContaining("correlationId="),
+                () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull());
     }
+
     @Test
     void synchronousKafkaTimeoutShouldBecomePublishException() {
         var failure = new TimeoutException("No broker metadata");
         when(kafkaTemplate.send(ArgumentMatchers.<ProducerRecord<String, Object>>any()))
                 .thenThrow(failure);
-        assertThatThrownBy(() -> new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT).publish(SEARCH))
-                .isInstanceOf(PublishException.class).hasCause(failure);
-        assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
+        var producer = new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT);
+        assertAll(
+                () -> assertThatThrownBy(() -> producer.publish(SEARCH))
+                .isInstanceOf(PublishException.class).hasCause(failure),
+                () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull());
     }
 
     @Test
     void asynchronousKafkaSendExceptionShouldBecomePublishException() {
-        var record = new ProducerRecord<String, Object>(TOPIC, SEARCH.searchId(), SEARCH);
-        var failure = new KafkaProducerException(record, "Send failed",
+        var producerRecord = new ProducerRecord<String, Object>(TOPIC, SEARCH.searchId(), SEARCH);
+        var failure = new KafkaProducerException(producerRecord, "Send failed",
                 new NetworkException("Connection lost"));
         when(kafkaTemplate.send(ArgumentMatchers.<ProducerRecord<String, Object>>any()))
                 .thenReturn(CompletableFuture.failedFuture(failure));
-        assertThatThrownBy(() -> new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT).publish(SEARCH))
+        var producer = new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT);
+        assertThatThrownBy(() -> producer.publish(SEARCH))
                 .isInstanceOf(PublishException.class).hasCause(failure);
     }
 
@@ -140,7 +145,8 @@ class SearchKafkaProducerTest {
         var failure = new IllegalStateException("Invalid producer state");
         when(kafkaTemplate.send(ArgumentMatchers.<ProducerRecord<String, Object>>any()))
                 .thenThrow(failure);
-        assertThatThrownBy(() -> new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT).publish(SEARCH))
+        var producer = new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT);
+        assertThatThrownBy(() -> producer.publish(SEARCH))
                 .isSameAs(failure);
     }
 
@@ -149,7 +155,8 @@ class SearchKafkaProducerTest {
         var failure = new IllegalArgumentException("Invalid record");
         when(kafkaTemplate.send(ArgumentMatchers.<ProducerRecord<String, Object>>any()))
                 .thenReturn(CompletableFuture.failedFuture(failure));
-        assertThatThrownBy(() -> new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT).publish(SEARCH))
+        var producer = new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT);
+        assertThatThrownBy(() -> producer.publish(SEARCH))
                 .isSameAs(failure);
     }
 
@@ -158,7 +165,8 @@ class SearchKafkaProducerTest {
         var failure = new SerializationException("Invalid payload");
         when(kafkaTemplate.send(ArgumentMatchers.<ProducerRecord<String, Object>>any()))
                 .thenReturn(CompletableFuture.failedFuture(failure));
-        assertThatThrownBy(() -> new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT).publish(SEARCH))
+        var producer = new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT);
+        assertThatThrownBy(() -> producer.publish(SEARCH))
                 .isSameAs(failure);
     }
 
@@ -166,9 +174,11 @@ class SearchKafkaProducerTest {
     void acknowledgmentTimeoutShouldBecomePublishException() {
         when(kafkaTemplate.send(ArgumentMatchers.<ProducerRecord<String, Object>>any()))
                 .thenReturn(new CompletableFuture<>());
-        assertThatThrownBy(() -> new SearchKafkaProducer(kafkaTemplate, TOPIC, Duration.ofMillis(1)).publish(SEARCH))
-                .isInstanceOf(PublishException.class).hasCauseInstanceOf(java.util.concurrent.TimeoutException.class);
-        assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
+        var producer = new SearchKafkaProducer(kafkaTemplate, TOPIC, Duration.ofMillis(1));
+        assertAll(
+                () -> assertThatThrownBy(() -> producer.publish(SEARCH))
+                .isInstanceOf(PublishException.class).hasCauseInstanceOf(java.util.concurrent.TimeoutException.class),
+                () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull());
     }
 
     @Test
@@ -178,10 +188,12 @@ class SearchKafkaProducerTest {
         MDC.put(CorrelationId.MDC_KEY, "interrupted-request");
         Thread.currentThread().interrupt();
         try {
-            assertThatThrownBy(() -> new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT).publish(SEARCH))
+            var producer = new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT);
+        assertThatThrownBy(() -> producer.publish(SEARCH))
                     .isInstanceOf(PublishException.class).hasCauseInstanceOf(InterruptedException.class);
-            assertThat(Thread.currentThread().isInterrupted()).isTrue();
-            assertThat(MDC.get(CorrelationId.MDC_KEY)).isEqualTo("interrupted-request");
+            assertAll(
+                    () -> assertThat(Thread.currentThread().isInterrupted()).isTrue(),
+                    () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isEqualTo("interrupted-request"));
         } finally {
             Thread.interrupted();
         }
@@ -191,7 +203,8 @@ class SearchKafkaProducerTest {
     void invalidKafkaConfigurationShouldNotBecomeInfrastructureError() {
         var failure = new ConfigException("Invalid bootstrap servers");
         when(kafkaTemplate.send(ArgumentMatchers.<ProducerRecord<String, Object>>any())).thenThrow(failure);
-        assertThatThrownBy(() -> new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT).publish(SEARCH))
+        var producer = new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT);
+        assertThatThrownBy(() -> producer.publish(SEARCH))
                 .isSameAs(failure);
     }
 
@@ -200,7 +213,8 @@ class SearchKafkaProducerTest {
         var invalidConfiguration = new ConfigException("Invalid bootstrap servers");
         var failure = new org.apache.kafka.common.KafkaException("Failed to construct producer", invalidConfiguration);
         when(kafkaTemplate.send(ArgumentMatchers.<ProducerRecord<String, Object>>any())).thenThrow(failure);
-        assertThatThrownBy(() -> new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT).publish(SEARCH))
+        var producer = new SearchKafkaProducer(kafkaTemplate, TOPIC, SEND_TIMEOUT);
+        assertThatThrownBy(() -> producer.publish(SEARCH))
                 .isSameAs(invalidConfiguration);
     }
 }

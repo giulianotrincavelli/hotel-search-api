@@ -13,6 +13,11 @@ import com.sling.hotel.infrastructure.adapter.out.kafka.SearchKafkaProducer;
 import com.sling.hotel.infrastructure.adapter.out.persistence.SearchPersistenceAdapter;
 import com.sling.hotel.infrastructure.adapter.out.persistence.repository.SearchJpaRepository;
 import com.sling.hotel.infrastructure.config.JacksonConfig;
+import com.sling.hotel.infrastructure.config.ValidationConfig;
+import org.springframework.test.context.bean.override.convention.TestBean;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import com.sling.hotel.infrastructure.logging.CorrelationId;
 import com.sling.hotel.infrastructure.messaging.kafka.model.SearchKafkaMessage;
 import com.sling.hotel.support.LogCapture;
@@ -46,6 +51,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.containsString;
@@ -66,8 +72,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(SearchController.class)
-@Import(JacksonConfig.class)
+@Import({JacksonConfig.class, ValidationConfig.class})
 class SearchControllerTest {
+
+    @TestBean
+    private Clock clock;
+
+    static Clock clock() {
+        return Clock.fixed(Instant.parse("2026-10-13T12:00:00Z"), ZoneOffset.UTC);
+    }
 
     @Autowired
     private MockMvc mockMvc;
@@ -91,8 +104,8 @@ class SearchControllerTest {
     private static final String VALID_REQUEST = """
             {
               "hotelId": "1234aBc",
-              "checkIn": "29/12/2023",
-              "checkOut": "31/12/2023",
+              "checkIn": "29/12/2030",
+              "checkOut": "31/12/2030",
               "ages": [30, 29, 1, 3]
             }
             """;
@@ -108,7 +121,7 @@ class SearchControllerTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(VALID_REQUEST))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.searchId").value("generated-id"));
     }
 
@@ -119,17 +132,18 @@ class SearchControllerTest {
         var sent = new AtomicReference<ProducerRecord<String, Object>>();
         when(template.send(ArgumentMatchers.<ProducerRecord<String, Object>>any()))
                 .thenAnswer(inv -> {
-                    ProducerRecord<String, Object> record = inv.getArgument(0);
-                    sent.set(record);
-                    return CompletableFuture.completedFuture(new SendResult<>(record,
-                            new RecordMetadata(new TopicPartition(record.topic(), 0), 42L, 0, 0, 0, 0)));
+                    ProducerRecord<String, Object> consumerRecord = inv.getArgument(0);
+                    sent.set(consumerRecord);
+                    return CompletableFuture.completedFuture(new SendResult<>(consumerRecord,
+                            new RecordMetadata(new TopicPartition(consumerRecord.topic(), 0), 42L, 0, 0, 0, 0)));
                 });
         var create = new CreateSearchUseCase(new SearchKafkaProducer(template, "hotel_availability_searches", Duration.ofSeconds(10)));
         when(createSearchPort.create(any(CreateSearchInput.class))).thenAnswer(inv -> create.create(inv.getArgument(0)));
         var repository = mock(SearchJpaRepository.class);
-        when(repository.mergeSearch(any(), any(), any(), any(), any())).thenAnswer(inv -> {
-            assertThat(Thread.currentThread().isVirtual()).isTrue();
-            assertThat(MDC.get(CorrelationId.MDC_KEY)).isEqualTo("full-flow-correlation");
+        when(repository.insertSearch(any(), any(), any(), any(), any())).thenAnswer(inv -> {
+            assertAll(
+                    () -> assertThat(Thread.currentThread().isVirtual()).isTrue(),
+                    () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isEqualTo("full-flow-correlation"));
             return 1;
         });
         var consumer = new SearchKafkaConsumer(new SaveSearchUseCase(new SearchPersistenceAdapter(repository)));
@@ -137,7 +151,7 @@ class SearchControllerTest {
         try (var logs = new LogCapture("com.sling.hotel")) {
             var result = mockMvc.perform(post("/search").contentType(MediaType.APPLICATION_JSON)
                             .header(CorrelationId.HEADER, "full-flow-correlation").content(VALID_REQUEST))
-                    .andExpect(status().isOk())
+                    .andExpect(status().isAccepted())
                     .andExpect(header().string(CorrelationId.HEADER, "full-flow-correlation"))
                     .andReturn();
             assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
@@ -153,14 +167,16 @@ class SearchControllerTest {
                     assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
                 }).get(5, TimeUnit.SECONDS);
             }
-            assertThat(result.getResponse().getContentAsString()).contains(produced.key());
-            verify(repository).mergeSearch(produced.key(), "1234aBc", LocalDate.of(2023, 12, 29),
-                    LocalDate.of(2023, 12, 31), "30,29,1,3");
+            assertAll(
+                    () -> assertThat(result.getResponse().getContentAsString()).contains(produced.key()),
+                    () -> verify(repository).insertSearch(produced.key(), "1234aBc", LocalDate.of(2030, 12, 29),
+                            LocalDate.of(2030, 12, 31), "30,29,1,3"));
             for (String phase : List.of("HTTP request:", "HTTP response:", "Kafka publication confirmed:",
                     "Kafka message received:", "Search inserted:", "Kafka message persisted:")) {
                 assertThat(logs.events()).anySatisfy(event -> {
-                    assertThat(event.getFormattedMessage()).contains(phase);
-                    assertThat(event.getMDCPropertyMap()).containsEntry(CorrelationId.MDC_KEY, "full-flow-correlation");
+                    assertAll(
+                            () -> assertThat(event.getFormattedMessage()).contains(phase),
+                            () -> assertThat(event.getMDCPropertyMap()).containsEntry(CorrelationId.MDC_KEY, "full-flow-correlation"));
                 });
             }
         }
@@ -177,12 +193,12 @@ class SearchControllerTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(VALID_REQUEST))
-                .andExpect(status().isOk());
+                .andExpect(status().isAccepted());
 
         verify(createSearchPort).create(argThat(cmd ->
                 cmd.hotelId().equals("1234aBc")
-                        && cmd.checkIn().equals(LocalDate.of(2023, 12, 29))
-                        && cmd.checkOut().equals(LocalDate.of(2023, 12, 31))
+                        && cmd.checkIn().equals(LocalDate.of(2030, 12, 29))
+                        && cmd.checkOut().equals(LocalDate.of(2030, 12, 31))
                         && cmd.ages().equals(List.of(30, 29, 1, 3))
         ));
     }
@@ -191,8 +207,8 @@ class SearchControllerTest {
     void postSearch_missingHotelId_returns400() throws Exception {
         var body = """
                 {
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [30]
                 }
                 """;
@@ -210,8 +226,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "2023-12-29",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "2030-12-29",
+                  "checkOut": "31/12/2030",
                   "ages": [30]
                 }
                 """;
@@ -228,7 +244,7 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
+                  "checkIn": "29/12/2030",
                   "checkOut": "invalid",
                   "ages": [30]
                 }
@@ -246,8 +262,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "31/12/2023",
-                  "checkOut": "29/12/2023",
+                  "checkIn": "31/12/2030",
+                  "checkOut": "29/12/2030",
                   "ages": [30]
                 }
                 """;
@@ -264,8 +280,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "29/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "29/12/2030",
                   "ages": [30]
                 }
                 """;
@@ -282,8 +298,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": []
                 }
                 """;
@@ -300,8 +316,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [30, -1]
                 }
                 """;
@@ -318,8 +334,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [30, null]
                 }
                 """;
@@ -349,8 +365,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [30],
                   "unknownField": "value"
                 }
@@ -367,7 +383,7 @@ class SearchControllerTest {
     void getCount_validSearchId_returnsCountResponse() throws Exception {
         var search = new HotelSearch(
                 "search-1", "1234aBc",
-                LocalDate.of(2023, 12, 29), LocalDate.of(2023, 12, 31),
+                LocalDate.of(2030, 12, 29), LocalDate.of(2030, 12, 31),
                 List.of(30, 29, 1, 3)
         );
         when(countSearchPort.count("search-1"))
@@ -377,8 +393,8 @@ class SearchControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.searchId").value("search-1"))
                 .andExpect(jsonPath("$.search.hotelId").value("1234aBc"))
-                .andExpect(jsonPath("$.search.checkIn").value("29/12/2023"))
-                .andExpect(jsonPath("$.search.checkOut").value("31/12/2023"))
+                .andExpect(jsonPath("$.search.checkIn").value("29/12/2030"))
+                .andExpect(jsonPath("$.search.checkOut").value("31/12/2030"))
                 .andExpect(jsonPath("$.search.ages", hasSize(4)))
                 .andExpect(jsonPath("$.count").value(100));
     }
@@ -450,8 +466,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "%s",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [30]
                 }
                 """.formatted("a".repeat(51));
@@ -474,8 +490,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "%s",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [30]
                 }
                 """.formatted("a".repeat(50));
@@ -483,7 +499,7 @@ class SearchControllerTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
-                .andExpect(status().isOk());
+                .andExpect(status().isAccepted());
     }
 
     @Test
@@ -491,8 +507,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023"
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030"
                 }
                 """;
 
@@ -508,7 +524,7 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkOut": "31/12/2023",
+                  "checkOut": "31/12/2030",
                   "ages": [30]
                 }
                 """;
@@ -525,7 +541,7 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
+                  "checkIn": "29/12/2030",
                   "ages": [30]
                 }
                 """;
@@ -545,8 +561,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [%s]
                 }
                 """.formatted(ages);
@@ -563,8 +579,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "   ",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [30]
                 }
                 """;
@@ -601,57 +617,14 @@ class SearchControllerTest {
                 .andExpect(status().isBadRequest());
     }
 
-    @Test
-    void postSearch_ageAsString_returns400() throws Exception {
-        var body = """
-                {
-                  "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
-                  "ages": ["thirty"]
-                }
-                """;
-
-        mockMvc.perform(post("/search")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"\"thirty\"", "\"30\"", "30.5", "true"})
+    void postSearch_invalidAgeType_returns400(String age) throws Exception {
+        String body = "{\"hotelId\":\"h1\",\"checkIn\":\"29/12/2030\",\"checkOut\":\"31/12/2030\",\"ages\":[%s]}".formatted(age);
+        mockMvc.perform(post("/search").contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message", containsString("ages")))
                 .andExpect(jsonPath("$.message", containsString("integer")));
-    }
-
-    @Test
-    void postSearch_ageAsDecimal_returns400() throws Exception {
-        var body = """
-                {
-                  "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
-                  "ages": [30.5]
-                }
-                """;
-
-        mockMvc.perform(post("/search")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isBadRequest());
-    }
-
-    @Test
-    void postSearch_ageAsBoolean_returns400() throws Exception {
-        var body = """
-                {
-                  "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
-                  "ages": [true]
-                }
-                """;
-
-        mockMvc.perform(post("/search")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isBadRequest());
     }
 
     @Test
@@ -659,8 +632,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [30, 101]
                 }
                 """;
@@ -683,8 +656,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [0, 100]
                 }
                 """;
@@ -692,11 +665,11 @@ class SearchControllerTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
-                .andExpect(status().isOk());
+                .andExpect(status().isAccepted());
     }
 
     @Test
-    void postSearch_sqlInjectionInHotelId_returns200NotError() throws Exception {
+    void postSearch_sqlInjectionInHotelId_returns202NotError() throws Exception {
         when(createSearchPort.create(any(CreateSearchInput.class)))
                 .thenAnswer(inv -> {
                     CreateSearchInput cmd = inv.getArgument(0);
@@ -706,8 +679,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "'; DROP TABLE hotel_search;--",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [30]
                 }
                 """;
@@ -715,7 +688,7 @@ class SearchControllerTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.searchId").exists());
 
         verify(createSearchPort).create(argThat(cmd ->
@@ -727,8 +700,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": ["30"]
                 }
                 """;
@@ -753,8 +726,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [%s]
                 }
                 """.formatted(ages);
@@ -762,7 +735,7 @@ class SearchControllerTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
-                .andExpect(status().isOk());
+                .andExpect(status().isAccepted());
     }
 
     @Test
@@ -776,8 +749,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [5, 5, 5, 5]
                 }
                 """;
@@ -785,7 +758,7 @@ class SearchControllerTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
-                .andExpect(status().isOk());
+                .andExpect(status().isAccepted());
 
         verify(createSearchPort).create(argThat(cmd ->
                 cmd.ages().equals(List.of(5, 5, 5, 5))));
@@ -802,8 +775,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "29/12/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "29/12/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [ 30 , 29 , 1 , 3 ]
                 }
                 """;
@@ -811,7 +784,7 @@ class SearchControllerTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
-                .andExpect(status().isOk());
+                .andExpect(status().isAccepted());
 
         verify(createSearchPort).create(argThat(cmd ->
                 cmd.ages().equals(List.of(30, 29, 1, 3))));
@@ -822,8 +795,8 @@ class SearchControllerTest {
         var body = """
                 {
                   "hotelId": "1234aBc",
-                  "checkIn": "31/02/2023",
-                  "checkOut": "31/12/2023",
+                  "checkIn": "31/02/2030",
+                  "checkOut": "31/12/2030",
                   "ages": [30]
                 }
                 """;
@@ -834,6 +807,7 @@ class SearchControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message", containsString("checkIn")));
     }
+
     @Test
     void kafkaInfrastructureFailureShouldReturn503AndProgrammingErrorShouldReturn500() throws Exception {
         KafkaTemplate<String, Object> template = mock();
@@ -853,4 +827,37 @@ class SearchControllerTest {
                     .andExpect(jsonPath("$.errors").value(nullValue()));
         }
     }
+
+    @Test
+    void dateValidationShouldNotPreventReadingPreviouslyPersistedSearches() throws Exception {
+        var historic = new HotelSearch("historic", "hotel", LocalDate.of(2020, 1, 1), LocalDate.of(2020, 1, 2), List.of(30));
+        when(countSearchPort.count("historic")).thenReturn(new CountSearchPort.Result(historic, 1));
+        mockMvc.perform(get("/count").param("searchId", "historic"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.search.checkIn").value("01/01/2020"));
+    }
+
+    @Test
+    void kafkaFailureShouldBeLoggedOnceWithPublicationContextAndCause() throws Exception {
+        KafkaTemplate<String, Object> template = mock();
+        var failure = new org.apache.kafka.common.errors.NetworkException("Connection lost");
+        when(template.send(ArgumentMatchers.<ProducerRecord<String, Object>>any()))
+                .thenReturn(CompletableFuture.failedFuture(failure));
+        var useCase = new CreateSearchUseCase(new SearchKafkaProducer(template, "test-topic", Duration.ofSeconds(1)));
+        when(createSearchPort.create(any())).thenAnswer(inv -> useCase.create(inv.getArgument(0)));
+        try (var logs = new LogCapture("com.sling.hotel")) {
+            mockMvc.perform(post("/search").header(CorrelationId.HEADER, "failed-publication")
+                            .contentType(MediaType.APPLICATION_JSON).content(VALID_REQUEST))
+                    .andExpect(status().isServiceUnavailable());
+            var errors = logs.events().stream().filter(event -> event.getLevel() == ch.qos.logback.classic.Level.ERROR).toList();
+            assertThat(errors).singleElement().satisfies(event -> {
+                assertAll(
+                        () -> assertThat(event.getFormattedMessage()).isEqualTo("Message publish failed"),
+                        () -> assertThat(event.getMDCPropertyMap()).containsEntry(CorrelationId.MDC_KEY, "failed-publication"),
+                        () -> assertThat(event.getThrowableProxy().getMessage())
+                                .contains("searchId=", "topic=test-topic", "correlationId=failed-publication"),
+                        () -> assertThat(event.getThrowableProxy().getCause().getMessage()).isEqualTo("Connection lost"));
+            });
+        }
+    }
+
 }

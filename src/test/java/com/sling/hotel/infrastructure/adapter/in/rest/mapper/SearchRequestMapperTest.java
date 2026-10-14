@@ -66,7 +66,8 @@ class SearchRequestMapperTest {
 
         CountResponse response = SearchRequestMapper.toCountResponse(result);
 
-        assertThatThrownBy(() -> response.search().ages().add(99))
+        var ages = response.search().ages();
+        assertThatThrownBy(() -> ages.add(99))
                 .isInstanceOf(UnsupportedOperationException.class);
     }
 }

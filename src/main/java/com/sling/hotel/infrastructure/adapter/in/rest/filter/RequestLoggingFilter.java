@@ -25,10 +25,8 @@ import java.util.concurrent.TimeUnit;
 public class RequestLoggingFilter extends OncePerRequestFilter {
 
     private static final Logger log = LoggerFactory.getLogger(RequestLoggingFilter.class);
-    static final String CORRELATION_HEADER = CorrelationId.HEADER;
-    static final String MDC_CORRELATION_ID = CorrelationId.MDC_KEY;
-    static final int MAX_CORRELATION_ID_LENGTH = CorrelationId.MAX_LENGTH;
     private static final int BODY_LOG_LIMIT = 16 * 1024;
+    private static final List<String> REQUEST_FIELDS = List.of("hotelId", "checkIn", "checkOut", "ages");
     private final JsonMapper jsonMapper;
 
     public RequestLoggingFilter(JsonMapper jsonMapper) {
@@ -39,52 +37,73 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
         String correlationId = resolveCorrelationId(request);
-        MDC.put(MDC_CORRELATION_ID, correlationId);
-        response.setHeader(CORRELATION_HEADER, correlationId);
+        MDC.put(CorrelationId.MDC_KEY, correlationId);
+        response.setHeader(CorrelationId.HEADER, correlationId);
 
-        boolean logBodies = log.isDebugEnabled() && (
-                ("POST".equals(request.getMethod()) && (request.getContextPath() + "/search").equals(request.getRequestURI()))
-                || ("GET".equals(request.getMethod()) && (request.getContextPath() + "/count").equals(request.getRequestURI())));
+        boolean logBodies = shouldLogBodies(request);
         var cachedRequest = logBodies ? new ContentCachingRequestWrapper(request, BODY_LOG_LIMIT) : null;
         var cachedResponse = logBodies ? new ContentCachingResponseWrapper(response) : null;
         long startNanos = System.nanoTime();
-        boolean failed = false;
+        boolean completed = false;
         try {
             chain.doFilter(logBodies ? cachedRequest : request, logBodies ? cachedResponse : response);
-        } catch (Exception e) {
-            failed = true;
-            log.error("HTTP processing failed: method={} path={}", request.getMethod(), request.getRequestURI(), e);
-            throw e;
+            completed = true;
         } finally {
-            try {
-                if (logBodies) {
-                    if ("POST".equals(request.getMethod())) {
-                        log.debug("HTTP request: method=POST path=/search body={}",
-                                jsonForLog(cachedRequest.getContentAsByteArray(), request.getCharacterEncoding(), true));
-                    } else {
-                        log.debug("HTTP request: method=GET path=/count searchId={}",
-                                singleLine(request.getParameter("searchId")));
-                    }
-                    log.debug("HTTP response: method={} path={} status={} body={}", request.getMethod(),
-                            request.getRequestURI(), cachedResponse.getStatus(),
-                            jsonForLog(cachedResponse.getContentAsByteArray(), cachedResponse.getCharacterEncoding(), false));
-                }
+            finishRequest(request, response, cachedRequest, cachedResponse, !completed, startNanos);
+        }
+    }
+
+    private static boolean shouldLogBodies(HttpServletRequest request) {
+        if (!log.isDebugEnabled()) {
+            return false;
+        }
+        String path = request.getRequestURI();
+        String contextPath = request.getContextPath();
+        return ("POST".equals(request.getMethod()) && (contextPath + "/search").equals(path))
+                || ("GET".equals(request.getMethod()) && (contextPath + "/count").equals(path));
+    }
+
+    private void finishRequest(HttpServletRequest request, HttpServletResponse response,
+                               ContentCachingRequestWrapper cachedRequest,
+                               ContentCachingResponseWrapper cachedResponse,
+                               boolean failed, long startNanos) throws IOException {
+        try {
+            if (cachedRequest != null) {
+                logBodies(request, cachedRequest, cachedResponse);
+            }
+            if (log.isInfoEnabled()) {
                 log.info("{} {} {} {}ms", request.getMethod(), request.getRequestURI(),
                         failed ? 500 : response.getStatus(), durationMs(startNanos));
-            } finally {
-                try {
-                    if (cachedResponse != null) {
-                        cachedResponse.copyBodyToResponse();
-                    }
-                } finally {
-                    MDC.remove(MDC_CORRELATION_ID);
+            }
+        } finally {
+            try {
+                if (cachedResponse != null) {
+                    cachedResponse.copyBodyToResponse();
                 }
+            } finally {
+                MDC.remove(CorrelationId.MDC_KEY);
             }
         }
     }
 
+    private void logBodies(HttpServletRequest request, ContentCachingRequestWrapper cachedRequest,
+                           ContentCachingResponseWrapper cachedResponse) {
+        if (log.isDebugEnabled()) {
+            if ("POST".equals(request.getMethod())) {
+                log.debug("HTTP request: method=POST path=/search body={}",
+                        jsonForLog(cachedRequest.getContentAsByteArray(), request.getCharacterEncoding(), true));
+            } else {
+                log.debug("HTTP request: method=GET path=/count searchId={}",
+                        singleLine(request.getParameter("searchId")));
+            }
+            log.debug("HTTP response: method={} path={} status={} body={}", request.getMethod(),
+                    request.getRequestURI(), cachedResponse.getStatus(),
+                    jsonForLog(cachedResponse.getContentAsByteArray(), cachedResponse.getCharacterEncoding(), false));
+        }
+    }
+
     static String resolveCorrelationId(HttpServletRequest request) {
-        return CorrelationId.resolve(request.getHeader(CORRELATION_HEADER));
+        return CorrelationId.resolve(request.getHeader(CorrelationId.HEADER));
     }
 
     private String jsonForLog(byte[] body, String encoding, boolean request) {
@@ -100,7 +119,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
             if (request) {
                 // Log only contract fields, never unexpected credential fields in invalid requests.
                 var fields = jsonMapper.createObjectNode();
-                for (String name : List.of("hotelId", "checkIn", "checkOut", "ages")) {
+                for (String name : REQUEST_FIELDS) {
                     if (json.has(name) && isSafeValue(json.get(name))) {
                         fields.set(name, json.get(name));
                     }
@@ -109,6 +128,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
             }
             return jsonMapper.writeValueAsString(json);
         } catch (Exception e) {
+            log.warn("HTTP body omitted from logs: exceptionType={}", e.getClass().getSimpleName());
             return "<unreadable JSON>";
         }
     }

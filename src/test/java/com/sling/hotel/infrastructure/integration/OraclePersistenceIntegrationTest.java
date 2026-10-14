@@ -1,7 +1,7 @@
 package com.sling.hotel.infrastructure.integration;
 
-import com.sling.hotel.domain.exception.IdempotencyConflictException;
 import com.sling.hotel.domain.model.HotelSearch;
+import com.sling.hotel.application.ports.out.SearchRepositoryPort.SearchCount;
 import com.sling.hotel.infrastructure.adapter.out.persistence.SearchPersistenceAdapter;
 import com.sling.hotel.infrastructure.adapter.out.persistence.repository.SearchJpaRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -24,14 +24,13 @@ import java.time.Duration;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @Tag("oracle-integration")
@@ -82,10 +81,11 @@ class OraclePersistenceIntegrationTest {
     void shouldInsertNewSearch() {
         adapter.save(SEARCH);
 
-        var found = adapter.findById("search-1");
-        assertThat(found).isPresent();
-        assertThat(found.get().hotelId()).isEqualTo("hotel-1");
-        assertThat(found.get().ages()).containsExactly(30, 29, 1, 3);
+        var found = adapter.findWithCount("search-1").map(SearchCount::search);
+        assertAll(
+                () -> assertThat(found).isPresent(),
+                () -> assertThat(found.get().hotelId()).isEqualTo("hotel-1"),
+                () -> assertThat(found.get().ages()).containsExactly(30, 29, 1, 3));
     }
 
     @Test
@@ -103,7 +103,7 @@ class OraclePersistenceIntegrationTest {
         adapter.save(SEARCH);
         adapter.save(SEARCH);
 
-        long count = adapter.countIdentical(SEARCH);
+        long count = adapter.findWithCount(SEARCH.searchId()).orElseThrow().count();
         assertThat(count).isEqualTo(1);
     }
 
@@ -129,8 +129,9 @@ class OraclePersistenceIntegrationTest {
             }
         }
 
-        assertThat(jpaRepository.count()).isEqualTo(1);
-        assertThat(adapter.findById(SEARCH.searchId())).contains(SEARCH);
+        assertAll(
+                () -> assertThat(jpaRepository.count()).isEqualTo(1),
+                () -> assertThat(adapter.findWithCount(SEARCH.searchId()).map(SearchCount::search)).contains(SEARCH));
     }
 
     @Test
@@ -146,7 +147,7 @@ class OraclePersistenceIntegrationTest {
         adapter.save(s2);
         adapter.save(s3);
 
-        assertThat(adapter.countIdentical(s1)).isEqualTo(3);
+        assertThat(adapter.findWithCount(s1.searchId()).orElseThrow().count()).isEqualTo(3);
     }
 
     @Test
@@ -158,12 +159,13 @@ class OraclePersistenceIntegrationTest {
 
         adapter.save(malicious);
 
-        var found = adapter.findById("sql-inj-1");
-        assertThat(found).isPresent();
-        assertThat(found.get().hotelId()).isEqualTo("'; DROP TABLE hotel_search;--");
+        var found = adapter.findWithCount("sql-inj-1").map(SearchCount::search);
+        assertAll(
+                () -> assertThat(found).isPresent(),
+                () -> assertThat(found.get().hotelId()).isEqualTo("'; DROP TABLE hotel_search;--"));
 
         adapter.save(SEARCH);
-        assertThat(adapter.findById("search-1")).isPresent();
+        assertThat(adapter.findWithCount("search-1").map(SearchCount::search)).isPresent();
     }
 
     @Test
@@ -175,9 +177,10 @@ class OraclePersistenceIntegrationTest {
 
         adapter.save(malicious);
 
-        var found = adapter.findById("' OR '1'='1");
-        assertThat(found).isPresent();
-        assertThat(found.get().searchId()).isEqualTo("' OR '1'='1");
+        var found = adapter.findWithCount("' OR '1'='1").map(SearchCount::search);
+        assertAll(
+                () -> assertThat(found).isPresent(),
+                () -> assertThat(found.get().searchId()).isEqualTo("' OR '1'='1"));
     }
 
     @Test
@@ -189,9 +192,10 @@ class OraclePersistenceIntegrationTest {
 
         adapter.save(search);
 
-        var found = adapter.findById("repeated-1");
-        assertThat(found).isPresent();
-        assertThat(found.get().ages()).containsExactly(5, 5, 5, 5);
+        var found = adapter.findWithCount("repeated-1").map(SearchCount::search);
+        assertAll(
+                () -> assertThat(found).isPresent(),
+                () -> assertThat(found.get().ages()).containsExactly(5, 5, 5, 5));
     }
 
     @Test
@@ -204,8 +208,9 @@ class OraclePersistenceIntegrationTest {
         adapter.save(s1);
         adapter.save(s2);
 
-        assertThat(adapter.countIdentical(s1)).isEqualTo(1);
-        assertThat(adapter.countIdentical(s2)).isEqualTo(1);
+        assertAll(
+                () -> assertThat(adapter.findWithCount(s1.searchId()).orElseThrow().count()).isEqualTo(1),
+                () -> assertThat(adapter.findWithCount(s2.searchId()).orElseThrow().count()).isEqualTo(1));
     }
 
     @Test
@@ -218,14 +223,15 @@ class OraclePersistenceIntegrationTest {
 
         adapter.save(search);
 
-        var found = adapter.findById("max-ages-1");
-        assertThat(found).isPresent();
-        assertThat(found.get().ages()).hasSize(50).allMatch(a -> a == 100);
+        var found = adapter.findWithCount("max-ages-1").map(SearchCount::search);
+        assertAll(
+                () -> assertThat(found).isPresent(),
+                () -> assertThat(found.get().ages()).hasSize(50).allMatch(a -> a == 100));
 
-        // Verify the serialized ages string is exactly 199 chars: 50 * "100" + 49 commas
         var entity = jpaRepository.findById("max-ages-1");
-        assertThat(entity).isPresent();
-        assertThat(entity.get().getAges()).hasSize(199);
+        assertAll(
+                () -> assertThat(entity).isPresent(),
+                () -> assertThat(entity.get().getAges()).hasSize(199));
     }
 
     @Test
@@ -240,9 +246,10 @@ class OraclePersistenceIntegrationTest {
 
         adapter.save(search);
 
-        var found = adapter.findById("unicode-1");
-        assertThat(found).isPresent();
-        assertThat(found.get().hotelId()).isEqualTo(unicodeHotelId);
+        var found = adapter.findWithCount("unicode-1").map(SearchCount::search);
+        assertAll(
+                () -> assertThat(found).isPresent(),
+                () -> assertThat(found.get().hotelId()).isEqualTo(unicodeHotelId));
     }
 
     @Test
@@ -256,10 +263,11 @@ class OraclePersistenceIntegrationTest {
         adapter.save(s1);
         adapter.save(s2);
 
-        assertThat(adapter.countIdentical(s1)).isEqualTo(2);
+        assertThat(adapter.findWithCount(s1.searchId()).orElseThrow().count()).isEqualTo(2);
     }
+
     @Test
-    void concurrentDifferentPayloadsForSameIdShouldKeepWinnerAndRejectLoser() throws Exception {
+    void concurrentDifferentPayloadsForSameIdShouldBothSucceedAndKeepOnePayload() throws Exception {
         var different = new HotelSearch(SEARCH.searchId(), "other-hotel", SEARCH.checkIn(), SEARCH.checkOut(), List.of(29, 30));
         var start = new CountDownLatch(1);
         try (var executor = Executors.newFixedThreadPool(2)) {
@@ -267,20 +275,138 @@ class OraclePersistenceIntegrationTest {
             for (var search : List.of(SEARCH, different)) {
                 futures.add(executor.submit(() -> {
                     start.await();
-                    try {
-                        adapter.save(search);
-                        return search;
-                    } catch (IdempotencyConflictException expected) {
-                        return null;
-                    }
+                    adapter.save(search);
+                    return search;
                 }));
             }
             start.countDown();
             var first = futures.get(0).get(30, TimeUnit.SECONDS);
             var second = futures.get(1).get(30, TimeUnit.SECONDS);
-            assertThat(Stream.of(first, second).filter(Objects::nonNull).toList()).hasSize(1);
-            assertThat(jpaRepository.count()).isEqualTo(1);
-            assertThat(adapter.findById(SEARCH.searchId())).contains(first != null ? first : second);
+            assertAll(
+                    () -> assertThat(List.of(first, second)).containsExactly(SEARCH, different),
+                    () -> assertThat(jpaRepository.count()).isEqualTo(1),
+                    () -> assertThat(adapter.findWithCount(SEARCH.searchId()).map(SearchCount::search).orElseThrow()).isIn(SEARCH, different));
         }
+    }
+
+    @Autowired
+    private org.springframework.transaction.PlatformTransactionManager transactionManager;
+
+    @Autowired
+    private jakarta.persistence.EntityManagerFactory entityManagerFactory;
+
+    @Test
+    void duplicateIdWithDifferentPayloadShouldKeepFirstRow() {
+        adapter.save(SEARCH);
+        var different = new HotelSearch(SEARCH.searchId(), "other-hotel", SEARCH.checkIn(), SEARCH.checkOut(), List.of(1));
+
+        adapter.save(different);
+
+        assertAll(
+                () -> assertThat(adapter.findWithCount(SEARCH.searchId()).map(SearchCount::search)).contains(SEARCH),
+                () -> assertThat(jpaRepository.count()).isEqualTo(1),
+                () -> assertThat(adapter.findWithCount(SEARCH.searchId()).orElseThrow().count()).isEqualTo(1));
+    }
+
+    @Test
+    void duplicateTransactionShouldNotPoisonCallerOrNextInsert() {
+        adapter.save(SEARCH);
+        var transactions = new org.springframework.transaction.support.TransactionTemplate(transactionManager);
+        var next = new HotelSearch("next-id", SEARCH.hotelId(), SEARCH.checkIn(), SEARCH.checkOut(), SEARCH.ages());
+
+        transactions.executeWithoutResult(status -> {
+            adapter.save(SEARCH);
+            assertThat(status.isRollbackOnly()).isFalse();
+            adapter.save(next);
+            assertThat(status.isRollbackOnly()).isFalse();
+        });
+
+        assertAll(
+                () -> assertThat(adapter.findWithCount(next.searchId()).map(SearchCount::search)).contains(next),
+                () -> assertThat(jpaRepository.count()).isEqualTo(2));
+    }
+
+    @Test
+    void combinedLookupShouldPreserveExactIdentityAndUseOneStatement() {
+        adapter.save(SEARCH);
+        var identical = new HotelSearch("same-payload", SEARCH.hotelId(), SEARCH.checkIn(), SEARCH.checkOut(), SEARCH.ages());
+        adapter.save(identical);
+        adapter.save(new HotelSearch("reversed", SEARCH.hotelId(), SEARCH.checkIn(), SEARCH.checkOut(), List.of(3, 1, 29, 30)));
+        adapter.save(new HotelSearch("repeated", SEARCH.hotelId(), SEARCH.checkIn(), SEARCH.checkOut(), List.of(30, 29, 1, 3, 3)));
+        adapter.save(new HotelSearch("case", "HOTEL-1", SEARCH.checkIn(), SEARCH.checkOut(), SEARCH.ages()));
+        adapter.save(new HotelSearch("other-date", SEARCH.hotelId(), SEARCH.checkIn().minusDays(1), SEARCH.checkOut(), SEARCH.ages()));
+        var statistics = entityManagerFactory.unwrap(org.hibernate.SessionFactory.class).getStatistics();
+        statistics.setStatisticsEnabled(true);
+        try {
+            statistics.clear();
+            var result = adapter.findWithCount(SEARCH.searchId()).orElseThrow();
+            assertAll(
+                    () -> assertThat(result.search()).isEqualTo(SEARCH),
+                    () -> assertThat(result.count()).isEqualTo(2),
+                    () -> assertThat(statistics.getPrepareStatementCount()).isEqualTo(1));
+        } finally {
+            statistics.setStatisticsEnabled(false);
+        }
+        assertAll(
+                () -> assertThat(adapter.findWithCount("missing")).isEmpty(),
+                () -> assertThat(adapter.findWithCount("' OR '1'='1")).isEmpty());
+    }
+
+    @Test
+    void combinedLookupShouldRemainCorrectWithSixConcurrentWriters() throws Exception {
+        adapter.save(SEARCH);
+        var start = new CountDownLatch(1);
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Future<?>> writes = new ArrayList<>();
+            for (int i = 0; i < 6; i++) {
+                String id = "parallel-" + i;
+                writes.add(executor.submit(() -> {
+                    start.await();
+                    adapter.save(new HotelSearch(id, SEARCH.hotelId(), SEARCH.checkIn(), SEARCH.checkOut(), SEARCH.ages()));
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (int i = 0; i < 6; i++) {
+                var result = adapter.findWithCount(SEARCH.searchId()).orElseThrow();
+                assertAll(
+                        () -> assertThat(result.search()).isEqualTo(SEARCH),
+                        () -> assertThat(result.count()).isBetween(1L, 7L));
+            }
+            for (var write : writes) {
+                write.get(30, TimeUnit.SECONDS);
+            }
+        }
+        var result = adapter.findWithCount(SEARCH.searchId()).orElseThrow();
+        assertAll(
+                () -> assertThat(result.count()).isEqualTo(7),
+                () -> assertThat(jpaRepository.count()).isEqualTo(7));
+        for (int i = 0; i < 6; i++) {
+            assertThat(adapter.findWithCount("parallel-" + i).orElseThrow().search())
+                    .isEqualTo(new HotelSearch("parallel-" + i, SEARCH.hotelId(), SEARCH.checkIn(), SEARCH.checkOut(), SEARCH.ages()));
+        }
+    }
+
+    @Test
+    void nonPkOracleConstraintFailureShouldPropagateAndLeaveRepositoryUsable() {
+        org.junit.jupiter.api.Assertions.assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
+                () -> jpaRepository.insertSearch("null-hotel", null, SEARCH.checkIn(), SEARCH.checkOut(), "30"));
+        adapter.save(SEARCH);
+        assertThat(adapter.findWithCount(SEARCH.searchId()).orElseThrow().search()).isEqualTo(SEARCH);
+    }
+
+    @Test
+    void duplicateShouldExecuteOnlyInsertWithoutAnAdditionalSelect() {
+        adapter.save(SEARCH);
+        var statistics = entityManagerFactory.unwrap(org.hibernate.SessionFactory.class).getStatistics();
+        statistics.setStatisticsEnabled(true);
+        try {
+            statistics.clear();
+            adapter.save(SEARCH);
+            assertThat(statistics.getPrepareStatementCount()).isEqualTo(1);
+        } finally {
+            statistics.setStatisticsEnabled(false);
+        }
+        assertThat(adapter.findWithCount(SEARCH.searchId()).map(SearchCount::search)).contains(SEARCH);
     }
 }

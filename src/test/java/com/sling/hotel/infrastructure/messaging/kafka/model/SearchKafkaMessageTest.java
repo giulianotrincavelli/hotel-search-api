@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -24,7 +25,8 @@ class SearchKafkaMessageTest {
     void agesShouldNotBeModifiableAfterCreation() {
         var message = new SearchKafkaMessage("s1", "h1", "2023-12-29", "2023-12-31", List.of(30, 29));
 
-        assertThatThrownBy(() -> message.ages().add(99))
+        var ages = message.ages();
+        assertThatThrownBy(() -> ages.add(99))
                 .isInstanceOf(UnsupportedOperationException.class);
     }
 
@@ -32,11 +34,12 @@ class SearchKafkaMessageTest {
     void shouldPreserveAllFields() {
         var message = new SearchKafkaMessage("s1", "h1", "2023-12-29", "2023-12-31", List.of(30, 29));
 
-        assertThat(message.searchId()).isEqualTo("s1");
-        assertThat(message.hotelId()).isEqualTo("h1");
-        assertThat(message.checkIn()).isEqualTo("2023-12-29");
-        assertThat(message.checkOut()).isEqualTo("2023-12-31");
-        assertThat(message.ages()).containsExactly(30, 29);
+        assertAll(
+                () -> assertThat(message.searchId()).isEqualTo("s1"),
+                () -> assertThat(message.hotelId()).isEqualTo("h1"),
+                () -> assertThat(message.checkIn()).isEqualTo("2023-12-29"),
+                () -> assertThat(message.checkOut()).isEqualTo("2023-12-31"),
+                () -> assertThat(message.ages()).containsExactly(30, 29));
     }
 
     @Test

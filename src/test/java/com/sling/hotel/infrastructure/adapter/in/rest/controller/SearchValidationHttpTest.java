@@ -5,6 +5,11 @@ import com.sling.hotel.application.ports.in.CountSearchPort;
 import com.sling.hotel.application.ports.in.CreateSearchPort;
 import com.sling.hotel.domain.model.HotelSearch;
 import com.sling.hotel.infrastructure.config.JacksonConfig;
+import com.sling.hotel.infrastructure.config.ValidationConfig;
+import org.springframework.test.context.bean.override.convention.TestBean;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -39,9 +44,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(SearchController.class)
-@Import(JacksonConfig.class)
+@Import({JacksonConfig.class, ValidationConfig.class})
 @TestPropertySource(properties = "logging.level.com.sling.hotel.infrastructure.adapter.in.rest.filter.RequestLoggingFilter=DEBUG")
 class SearchValidationHttpTest {
+
+    @TestBean
+    private Clock clock;
+
+    static Clock clock() {
+        return Clock.fixed(Instant.parse("2026-10-13T12:00:00Z"), ZoneOffset.UTC);
+    }
 
     @Test
     void unknownPropertyShouldUseCommonErrorResponse() throws Exception {
@@ -86,35 +98,35 @@ class SearchValidationHttpTest {
         return Stream.of(
                 Arguments.of("absent",
                         """
-                        {"checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30]}
+                        {"checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30]}
                         """,
                         "hotelId: hotelId is required"),
                 Arguments.of("null",
                         """
-                        {"hotelId": null, "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": null, "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30]}
                         """,
                         "hotelId: hotelId is required"),
                 Arguments.of("empty",
                         """
-                        {"hotelId": "", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": "", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30]}
                         """,
                         "hotelId: hotelId is required"),
                 Arguments.of("blank",
                         """
-                        {"hotelId": "   ", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": "   ", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30]}
                         """,
                         "hotelId: hotelId is required"),
                 Arguments.of("51 characters",
                         """
-                        {"hotelId": "%s", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": "%s", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30]}
                         """.formatted("a".repeat(51)),
                         "hotelId: hotelId must have at most 50 characters")
         );
     }
 
-    @ParameterizedTest(name = "hotelId {0} → 400 with validation error")
-    @MethodSource("hotelIdInvalidCases")
-    void hotelId_beanValidationErrors(String caseName, String body, String expectedError) throws Exception {
+    @ParameterizedTest(name = "{0} → 400")
+    @MethodSource({"hotelIdInvalidCases", "checkInInvalidCases", "checkOutInvalidCases", "agesTopLevelInvalidCases", "agesElementBeanValidationCases"})
+    void invalidFieldsShouldReturnValidationErrors(String caseName, String body, String expectedError) throws Exception {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
@@ -130,16 +142,16 @@ class SearchValidationHttpTest {
     static Stream<Arguments> hotelIdTypeMismatchCases() {
         return Stream.of(
                 Arguments.of("number", """
-                        {"hotelId": 123, "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": 123, "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30]}
                         """, "hotelId must be a string"),
                 Arguments.of("boolean", """
-                        {"hotelId": true, "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": true, "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30]}
                         """, "hotelId must be a string"),
                 Arguments.of("array", """
-                        {"hotelId": [1], "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": [1], "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30]}
                         """, "hotelId must be a string"),
                 Arguments.of("object", """
-                        {"hotelId": {"x":1}, "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": {"x":1}, "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30]}
                         """, "hotelId must be a string")
         );
     }
@@ -162,56 +174,41 @@ class SearchValidationHttpTest {
         return Stream.of(
                 Arguments.of("absent",
                         """
-                        {"hotelId": "h1", "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": "h1", "checkOut": "31/12/2030", "ages": [30]}
                         """,
                         "checkIn: checkIn is required"),
                 Arguments.of("null",
                         """
-                        {"hotelId": "h1", "checkIn": null, "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": "h1", "checkIn": null, "checkOut": "31/12/2030", "ages": [30]}
                         """,
                         "checkIn: checkIn is required"),
                 Arguments.of("empty string",
                         """
-                        {"hotelId": "h1", "checkIn": "", "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": "h1", "checkIn": "", "checkOut": "31/12/2030", "ages": [30]}
                         """,
                         "checkIn: checkIn is required")
         );
     }
 
-    @ParameterizedTest(name = "checkIn {0} → 400 with validation error")
-    @MethodSource("checkInInvalidCases")
-    void checkIn_beanValidationErrors(String caseName, String body, String expectedError) throws Exception {
-        mockMvc.perform(post("/search")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isBadRequest())
-                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.status", is(400)))
-                .andExpect(jsonPath("$.message", is("Validation failed")))
-                .andExpect(jsonPath("$.errors[0]", is(expectedError)));
-
-        verify(createSearchPort, never()).create(any());
-    }
-
     static Stream<Arguments> checkInFormatCases() {
         return Stream.of(
                 Arguments.of("wrong format", """
-                        {"hotelId": "h1", "checkIn": "2023-12-29", "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": "h1", "checkIn": "2030-12-29", "checkOut": "31/12/2030", "ages": [30]}
                         """),
                 Arguments.of("nonexistent date", """
-                        {"hotelId": "h1", "checkIn": "31/02/2023", "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": "h1", "checkIn": "31/02/2030", "checkOut": "31/12/2030", "ages": [30]}
                         """),
                 Arguments.of("number", """
-                        {"hotelId": "h1", "checkIn": 123, "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": "h1", "checkIn": 123, "checkOut": "31/12/2030", "ages": [30]}
                         """),
                 Arguments.of("boolean", """
-                        {"hotelId": "h1", "checkIn": true, "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": "h1", "checkIn": true, "checkOut": "31/12/2030", "ages": [30]}
                         """),
                 Arguments.of("array", """
-                        {"hotelId": "h1", "checkIn": [1], "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": "h1", "checkIn": [1], "checkOut": "31/12/2030", "ages": [30]}
                         """),
                 Arguments.of("object", """
-                        {"hotelId": "h1", "checkIn": {"x":1}, "checkOut": "31/12/2023", "ages": [30]}
+                        {"hotelId": "h1", "checkIn": {"x":1}, "checkOut": "31/12/2030", "ages": [30]}
                         """)
         );
     }
@@ -234,56 +231,41 @@ class SearchValidationHttpTest {
         return Stream.of(
                 Arguments.of("absent",
                         """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "ages": [30]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "ages": [30]}
                         """,
                         "checkOut: checkOut is required"),
                 Arguments.of("null",
                         """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": null, "ages": [30]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": null, "ages": [30]}
                         """,
                         "checkOut: checkOut is required"),
                 Arguments.of("empty string",
                         """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "", "ages": [30]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "", "ages": [30]}
                         """,
                         "checkOut: checkOut is required")
         );
     }
 
-    @ParameterizedTest(name = "checkOut {0} → 400 with validation error")
-    @MethodSource("checkOutInvalidCases")
-    void checkOut_beanValidationErrors(String caseName, String body, String expectedError) throws Exception {
-        mockMvc.perform(post("/search")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isBadRequest())
-                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.status", is(400)))
-                .andExpect(jsonPath("$.message", is("Validation failed")))
-                .andExpect(jsonPath("$.errors[0]", is(expectedError)));
-
-        verify(createSearchPort, never()).create(any());
-    }
-
     static Stream<Arguments> checkOutFormatCases() {
         return Stream.of(
                 Arguments.of("wrong format", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "invalid", "ages": [30]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "invalid", "ages": [30]}
                         """),
                 Arguments.of("nonexistent date", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/02/2023", "ages": [30]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/02/2030", "ages": [30]}
                         """),
                 Arguments.of("number", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": 456, "ages": [30]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": 456, "ages": [30]}
                         """),
                 Arguments.of("boolean", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": false, "ages": [30]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": false, "ages": [30]}
                         """),
                 Arguments.of("array", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": [1], "ages": [30]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": [1], "ages": [30]}
                         """),
                 Arguments.of("object", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": {"x":1}, "ages": [30]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": {"x":1}, "ages": [30]}
                         """)
         );
     }
@@ -307,7 +289,7 @@ class SearchValidationHttpTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "29/12/2023", "ages": [30]}
+                                {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "29/12/2030", "ages": [30]}
                                 """))
                 .andExpect(status().isBadRequest())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
@@ -322,7 +304,7 @@ class SearchValidationHttpTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "h1", "checkIn": "31/12/2023", "checkOut": "29/12/2023", "ages": [30]}
+                                {"hotelId": "h1", "checkIn": "31/12/2030", "checkOut": "29/12/2030", "ages": [30]}
                                 """))
                 .andExpect(status().isBadRequest())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
@@ -336,35 +318,20 @@ class SearchValidationHttpTest {
         return Stream.of(
                 Arguments.of("absent",
                         """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023"}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030"}
                         """,
                         "ages: ages is required and must not be empty"),
                 Arguments.of("null",
                         """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": null}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": null}
                         """,
                         "ages: ages is required and must not be empty"),
                 Arguments.of("empty array",
                         """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": []}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": []}
                         """,
                         "ages: ages is required and must not be empty")
         );
-    }
-
-    @ParameterizedTest(name = "ages {0} → 400 with validation error")
-    @MethodSource("agesTopLevelInvalidCases")
-    void ages_beanValidationErrors(String caseName, String body, String expectedError) throws Exception {
-        mockMvc.perform(post("/search")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isBadRequest())
-                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.status", is(400)))
-                .andExpect(jsonPath("$.message", is("Validation failed")))
-                .andExpect(jsonPath("$.errors[0]", is(expectedError)));
-
-        verify(createSearchPort, never()).create(any());
     }
 
     @Test
@@ -373,7 +340,7 @@ class SearchValidationHttpTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [%s]}
+                                {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [%s]}
                                 """.formatted(ages)))
                 .andExpect(status().isBadRequest())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
@@ -387,23 +354,23 @@ class SearchValidationHttpTest {
     static Stream<Arguments> agesTypeMismatchCases() {
         return Stream.of(
                 Arguments.of("string", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": "test"}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": "test"}
                         """),
                 Arguments.of("number", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": 123}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": 123}
                         """),
                 Arguments.of("boolean", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": true}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": true}
                         """),
                 Arguments.of("object", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": {"x":1}}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": {"x":1}}
                         """)
         );
     }
 
-    @ParameterizedTest(name = "ages as {0} → 400 malformed")
-    @MethodSource("agesTypeMismatchCases")
-    void ages_typeMismatch(String caseName, String body) throws Exception {
+    @ParameterizedTest(name = "{0} → 400")
+    @MethodSource({"agesTypeMismatchCases", "bodyInvalidCases"})
+    void malformedBodiesShouldReturn400(String caseName, String body) throws Exception {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
@@ -418,55 +385,40 @@ class SearchValidationHttpTest {
     static Stream<Arguments> agesElementBeanValidationCases() {
         return Stream.of(
                 Arguments.of("null", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [null]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [null]}
                         """,
                         "ages[0]: each age must not be null"),
                 Arguments.of("negative", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [-1]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [-1]}
                         """,
                         "ages[0]: each age must be an integer between 0 and 100"),
                 Arguments.of("above 100", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [101]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [101]}
                         """,
                         "ages[0]: each age must be an integer between 0 and 100"),
                 Arguments.of("negative at index 1", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30, -5]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30, -5]}
                         """,
                         "ages[1]: each age must be an integer between 0 and 100")
         );
     }
 
-    @ParameterizedTest(name = "ages[i] {0} → 400 with validation error")
-    @MethodSource("agesElementBeanValidationCases")
-    void agesElement_beanValidationErrors(String caseName, String body, String expectedError) throws Exception {
-        mockMvc.perform(post("/search")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isBadRequest())
-                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.status", is(400)))
-                .andExpect(jsonPath("$.message", is("Validation failed")))
-                .andExpect(jsonPath("$.errors[0]", is(expectedError)));
-
-        verify(createSearchPort, never()).create(any());
-    }
-
     static Stream<Arguments> agesElementTypeMismatchCases() {
         return Stream.of(
                 Arguments.of("decimal", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30.5]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30.5]}
                         """),
                 Arguments.of("string", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": ["abc"]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": ["abc"]}
                         """),
                 Arguments.of("boolean", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [true]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [true]}
                         """),
                 Arguments.of("object", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [{"x":1}]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [{"x":1}]}
                         """),
                 Arguments.of("nested array", """
-                        {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [[1]]}
+                        {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [[1]]}
                         """)
         );
     }
@@ -490,7 +442,7 @@ class SearchValidationHttpTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [10, 20, 3.5]}
+                                {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [10, 20, 3.5]}
                                 """))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message", is("ages[2] must contain only integer numbers")));
@@ -503,7 +455,7 @@ class SearchValidationHttpTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [10, "30"]}
+                                {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [10, "30"]}
                                 """))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message", is("ages[1] must contain only integer numbers")));
@@ -523,28 +475,14 @@ class SearchValidationHttpTest {
         );
     }
 
-    @ParameterizedTest(name = "body {0} → 400 malformed")
-    @MethodSource("bodyInvalidCases")
-    void body_invalid(String caseName, String body) throws Exception {
-        mockMvc.perform(post("/search")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isBadRequest())
-                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.status", is(400)))
-                .andExpect(jsonPath("$.message", is("Malformed request body")));
-
-        verify(createSearchPort, never()).create(any());
-    }
-
     @Test
     void valid_hotelId50Characters_returns200() throws Exception {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "%s", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30]}
+                                {"hotelId": "%s", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30]}
                                 """.formatted("a".repeat(50))))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.searchId", notNullValue()));
     }
 
@@ -553,9 +491,9 @@ class SearchValidationHttpTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [50]}
+                                {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [50]}
                                 """))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.searchId", notNullValue()));
 
         verify(createSearchPort).create(any());
@@ -567,9 +505,9 @@ class SearchValidationHttpTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [%s]}
+                                {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [%s]}
                                 """.formatted(ages)))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.searchId", notNullValue()));
 
         verify(createSearchPort).create(any());
@@ -580,9 +518,9 @@ class SearchValidationHttpTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [0]}
+                                {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [0]}
                                 """))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.searchId", notNullValue()));
     }
 
@@ -591,9 +529,9 @@ class SearchValidationHttpTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [100]}
+                                {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [100]}
                                 """))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.searchId", notNullValue()));
     }
 
@@ -602,9 +540,9 @@ class SearchValidationHttpTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [5, 5, 5]}
+                                {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [5, 5, 5]}
                                 """))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.searchId", notNullValue()));
 
         verify(createSearchPort).create(argThat(cmd ->
@@ -616,9 +554,9 @@ class SearchValidationHttpTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "31/12/2023", "ages": [30, 29, 1, 3]}
+                                {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "31/12/2030", "ages": [30, 29, 1, 3]}
                                 """))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.searchId", notNullValue()));
 
         verify(createSearchPort).create(argThat(cmd ->
@@ -630,13 +568,40 @@ class SearchValidationHttpTest {
         mockMvc.perform(post("/search")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"hotelId": "h1", "checkIn": "29/12/2023", "checkOut": "30/12/2023", "ages": [30]}
+                                {"hotelId": "h1", "checkIn": "29/12/2030", "checkOut": "30/12/2030", "ages": [30]}
                                 """))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.searchId", notNullValue()));
     }
 
     private static CreateSearchInput argThat(java.util.function.Predicate<CreateSearchInput> predicate) {
         return ArgumentMatchers.argThat(predicate::test);
     }
+    @ParameterizedTest
+    @ValueSource(strings = {"2026-10-12", "2020-01-01"})
+    void pastCheckInShouldReturn400UsingInjectedClock(String date) throws Exception {
+        String checkIn = java.time.LocalDate.parse(date).format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"));
+        String body = "{\"hotelId\":\"h1\",\"checkIn\":\"%s\",\"checkOut\":\"14/10/2026\",\"ages\":[30]}".formatted(checkIn);
+        mockMvc.perform(post("/search").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors[0]").value("checkIn: checkIn must not be in the past"));
+        verify(createSearchPort, never()).create(any());
+    }
+
+    @Test
+    void todayShouldBeAcceptedUsingInjectedClock() throws Exception {
+        mockMvc.perform(post("/search").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"hotelId\":\"h1\",\"checkIn\":\"13/10/2026\",\"checkOut\":\"14/10/2026\",\"ages\":[30]}"))
+                .andExpect(status().isAccepted()).andExpect(jsonPath("$.searchId").isNotEmpty());
+    }
+
+    @Test
+    void pastCheckOutShouldReturn400UsingInjectedClock() throws Exception {
+        mockMvc.perform(post("/search").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"hotelId\":\"h1\",\"checkIn\":\"13/10/2026\",\"checkOut\":\"12/10/2026\",\"ages\":[30]}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errors[0]").value("checkOut: checkOut must not be in the past"));
+        verify(createSearchPort, never()).create(any());
+    }
+
 }

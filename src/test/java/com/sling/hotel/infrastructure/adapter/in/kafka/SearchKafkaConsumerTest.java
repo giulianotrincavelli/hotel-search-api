@@ -7,6 +7,10 @@ import com.sling.hotel.infrastructure.messaging.kafka.model.SearchKafkaMessage;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.Arguments;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
@@ -46,42 +50,45 @@ class SearchKafkaConsumerTest {
 
     private static final String TOPIC = "test-topic";
 
-    private static ConsumerRecord<String, SearchKafkaMessage> record(SearchKafkaMessage message) {
+    private static ConsumerRecord<String, SearchKafkaMessage> consumerRecord(SearchKafkaMessage message) {
         return new ConsumerRecord<>(TOPIC, 0, 42L, message.searchId(), message);
     }
 
     @Test
     void shouldLoadHeaderAndClearMdcOnVirtualThreadIncludingFailures() throws Exception {
         var message = new SearchKafkaMessage("search-context", "hotel-1", "2023-12-29", "2023-12-31", List.of(30));
-        var record = record(message);
-        record.headers().add(CorrelationId.HEADER, "message-correlation".getBytes(StandardCharsets.UTF_8));
+        var consumerRecord = consumerRecord(message);
+        consumerRecord.headers().add(CorrelationId.HEADER, "message-correlation".getBytes(StandardCharsets.UTF_8));
         doAnswer(inv -> {
-            assertThat(Thread.currentThread().isVirtual()).isTrue();
-            assertThat(MDC.get(CorrelationId.MDC_KEY)).isEqualTo("message-correlation");
+            assertAll(
+                    () -> assertThat(Thread.currentThread().isVirtual()).isTrue(),
+                    () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isEqualTo("message-correlation"));
             throw new RuntimeException("DB unavailable");
         }).when(saveSearchPort).save(ArgumentMatchers.any());
 
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             executor.submit(() -> {
                 MDC.put(CorrelationId.MDC_KEY, "stale-context");
-                assertThatThrownBy(() -> consumer.consume(record)).hasMessage("DB unavailable");
-                assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
+                assertAll(
+                        () -> assertThatThrownBy(() -> consumer.consume(consumerRecord)).hasMessage("DB unavailable"),
+                        () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull());
             }).get(5, TimeUnit.SECONDS);
         }
     }
 
     @Test
     void shouldGenerateIndependentCorrelationIdForMessageWithoutHeaderAndClearMdc() {
-        var record = record(new SearchKafkaMessage("search-no-header", "hotel-1", "2023-12-29", "2023-12-31", List.of(30)));
+        var consumerRecord = consumerRecord(new SearchKafkaMessage("search-no-header", "hotel-1", "2023-12-29", "2023-12-31", List.of(30)));
         MDC.put(CorrelationId.MDC_KEY, "previous-message");
         doAnswer(inv -> {
             String id = MDC.get(CorrelationId.MDC_KEY);
-            assertThat(UUID.fromString(id)).isNotNull();
-            assertThat(id).isNotEqualTo("previous-message").isNotEqualTo(record.key());
-            assertThat(new String(record.headers().lastHeader(CorrelationId.HEADER).value(), StandardCharsets.UTF_8)).isEqualTo(id);
+            assertAll(
+                    () -> assertThat(UUID.fromString(id)).isNotNull(),
+                    () -> assertThat(id).isNotEqualTo("previous-message").isNotEqualTo(consumerRecord.key()),
+                    () -> assertThat(new String(consumerRecord.headers().lastHeader(CorrelationId.HEADER).value(), StandardCharsets.UTF_8)).isEqualTo(id));
             return null;
         }).when(saveSearchPort).save(ArgumentMatchers.any());
-        consumer.consume(record);
+        consumer.consume(consumerRecord);
         assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
     }
 
@@ -92,7 +99,7 @@ class SearchKafkaConsumerTest {
                 List.of(30, 29, 1, 3)
         );
 
-        consumer.consume(record(message));
+        consumer.consume(consumerRecord(message));
 
         ArgumentCaptor<HotelSearch> captor = ArgumentCaptor.forClass(HotelSearch.class);
         verify(saveSearchPort).save(captor.capture());
@@ -114,36 +121,35 @@ class SearchKafkaConsumerTest {
                 List.of(30)
         );
 
-        doThrow(new RuntimeException("DB error"))
-                .when(saveSearchPort).save(ArgumentMatchers.any());
+        var failure = new IllegalStateException("DB error");
+        doThrow(failure).when(saveSearchPort).save(ArgumentMatchers.any());
 
-        assertThatThrownBy(() -> consumer.consume(record(message)))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessage("DB error");
+        var incoming = consumerRecord(message);
+        assertAll(
+                () -> assertThatThrownBy(() -> consumer.consume(incoming)).isSameAs(failure),
+                () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull());
     }
 
-    @Test
-    void shouldThrowInvalidKafkaMessageExceptionOnInvalidDate() {
-        var message = new SearchKafkaMessage(
-                "search-1", "hotel-1", "not-a-date", "2023-12-31",
-                List.of(30)
-        );
-
-        assertThatThrownBy(() -> consumer.consume(record(message)))
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("invalidMessages")
+    void shouldRejectInvalidKafkaMessage(String scenario, SearchKafkaMessage message) {
+        var incoming = consumerRecord(message);
+        assertAll(
+                () -> assertThatThrownBy(() -> consumer.consume(incoming))
                 .isInstanceOf(InvalidKafkaMessageException.class)
-                .hasMessageContaining("Invalid Kafka message");
+                        .hasMessageContaining("Invalid Kafka message"),
+                () -> Mockito.verifyNoInteractions(saveSearchPort),
+                () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull());
     }
 
-    @Test
-    void shouldThrowInvalidKafkaMessageExceptionOnNullSearchId() {
-        var message = new SearchKafkaMessage(
-                null, "hotel-1", "2023-12-29", "2023-12-31",
-                List.of(30)
-        );
-
-        assertThatThrownBy(() -> consumer.consume(record(message)))
-                .isInstanceOf(InvalidKafkaMessageException.class)
-                .hasMessageContaining("Invalid Kafka message");
+    static Stream<Arguments> invalidMessages() {
+        return Stream.of(
+                Arguments.of("invalid date",
+                        new SearchKafkaMessage("search-1", "hotel-1", "not-a-date", "2023-12-31", List.of(30))),
+                Arguments.of("null searchId",
+                        new SearchKafkaMessage(null, "hotel-1", "2023-12-29", "2023-12-31", List.of(30))),
+                Arguments.of("null checkIn",
+                        new SearchKafkaMessage("search-1", "hotel-1", null, "2023-12-31", List.of(30))));
     }
 
     @Test
@@ -153,7 +159,7 @@ class SearchKafkaConsumerTest {
                 List.of(3, 29, 30, 1)
         );
 
-        consumer.consume(record(message));
+        consumer.consume(consumerRecord(message));
 
         ArgumentCaptor<HotelSearch> captor = ArgumentCaptor.forClass(HotelSearch.class);
         verify(saveSearchPort).save(captor.capture());
@@ -167,7 +173,7 @@ class SearchKafkaConsumerTest {
                 List.of(5, 5, 5)
         );
 
-        consumer.consume(record(message));
+        consumer.consume(consumerRecord(message));
 
         ArgumentCaptor<HotelSearch> captor = ArgumentCaptor.forClass(HotelSearch.class);
         verify(saveSearchPort).save(captor.capture());
@@ -181,7 +187,8 @@ class SearchKafkaConsumerTest {
                 List.of(30)
         );
 
-        assertThatThrownBy(() -> consumer.consume(record(message)))
+        var incoming = consumerRecord(message);
+        assertThatThrownBy(() -> consumer.consume(incoming))
                 .isInstanceOf(InvalidKafkaMessageException.class)
                 .hasMessageContaining("Invalid Kafka message");
     }
@@ -193,7 +200,8 @@ class SearchKafkaConsumerTest {
                 java.util.Collections.nCopies(51, 50)
         );
 
-        assertThatThrownBy(() -> consumer.consume(record(message)))
+        var incoming = consumerRecord(message);
+        assertThatThrownBy(() -> consumer.consume(incoming))
                 .isInstanceOf(InvalidKafkaMessageException.class)
                 .hasMessageContaining("Invalid Kafka message");
     }
@@ -205,7 +213,7 @@ class SearchKafkaConsumerTest {
                 List.of(30)
         );
 
-        consumer.consume(record(message));
+        consumer.consume(consumerRecord(message));
 
         ArgumentCaptor<HotelSearch> captor = ArgumentCaptor.forClass(HotelSearch.class);
         verify(saveSearchPort).save(captor.capture());
@@ -219,7 +227,7 @@ class SearchKafkaConsumerTest {
                 java.util.Collections.nCopies(50, 100)
         );
 
-        consumer.consume(record(message));
+        consumer.consume(consumerRecord(message));
 
         ArgumentCaptor<HotelSearch> captor = ArgumentCaptor.forClass(HotelSearch.class);
         verify(saveSearchPort).save(captor.capture());
@@ -227,23 +235,30 @@ class SearchKafkaConsumerTest {
     }
 
     @Test
-    void shouldThrowInvalidKafkaMessageExceptionOnNullCheckIn() {
-        var message = new SearchKafkaMessage(
-                "search-1", "hotel-1", null, "2023-12-31",
-                List.of(30)
-        );
-
-        assertThatThrownBy(() -> consumer.consume(record(message)))
-                .isInstanceOf(InvalidKafkaMessageException.class)
-                .hasMessageContaining("Invalid Kafka message");
-    }
-    @Test
     void nullValueShouldBeRejectedAsPermanentInvalidMessageAndClearMdc() {
-        var record = new ConsumerRecord<String, SearchKafkaMessage>("hotel_availability_searches", 0, 5, "null-search", null);
-        assertThatThrownBy(() -> consumer.consume(record))
+        var consumerRecord = new ConsumerRecord<String, SearchKafkaMessage>("hotel_availability_searches", 0, 5, "null-search", null);
+        assertAll(
+                () -> assertThatThrownBy(() -> consumer.consume(consumerRecord))
                 .isInstanceOf(InvalidKafkaMessageException.class)
-                .hasMessage("Kafka message value must not be null");
-        Mockito.verifyNoInteractions(saveSearchPort);
-        assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
+                        .hasMessage("Kafka message value must not be null"),
+                () -> Mockito.verifyNoInteractions(saveSearchPort),
+                () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull());
     }
+
+    @Test
+    void disabledDebugLoggingShouldNotProduceDetailsOrReadOffset() {
+        var message = new SearchKafkaMessage("search-1", "hotel-1", "2023-12-29", "2023-12-31", List.of(30));
+        var incoming = Mockito.spy(consumerRecord(message));
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(SearchKafkaConsumer.class);
+        try (var logs = new com.sling.hotel.support.LogCapture(SearchKafkaConsumer.class.getName())) {
+            logger.setLevel(ch.qos.logback.classic.Level.INFO);
+            consumer.consume(incoming);
+            assertAll(
+                    () -> verify(saveSearchPort).save(ArgumentMatchers.any()),
+                    () -> Mockito.verify(incoming, Mockito.never()).offset(),
+                    () -> assertThat(logs.events()).isEmpty(),
+                    () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull());
+        }
+    }
+
 }

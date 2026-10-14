@@ -1,6 +1,6 @@
 package com.sling.hotel.infrastructure.config;
 
-import com.sling.hotel.domain.exception.IdempotencyConflictException;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.sling.hotel.infrastructure.adapter.in.kafka.InvalidKafkaMessageException;
 import com.sling.hotel.infrastructure.adapter.out.kafka.SearchKafkaProducer;
 import com.sling.hotel.infrastructure.logging.CorrelationId;
@@ -48,6 +48,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -68,19 +69,12 @@ class KafkaConfigTest {
             new HotelSearchKafkaProperties.Dlt(Duration.ofSeconds(15))
     );
 
-    private final KafkaConfig kafkaConfig = new KafkaConfig(DEFAULT_PROPS);
+    private final KafkaConfig kafkaConfig = new KafkaConfig(DEFAULT_PROPS, 1);
 
     @Test
     void invalidKafkaMessageExceptionShouldBeClassifiedAsNotRetryable() {
         DefaultErrorHandler handler = kafkaConfig.kafkaErrorHandler(kafkaOperations);
         var removed = handler.removeClassification(InvalidKafkaMessageException.class);
-        assertThat(removed).isNotNull().isFalse();
-    }
-
-    @Test
-    void idempotencyConflictExceptionShouldBeClassifiedAsNotRetryable() {
-        DefaultErrorHandler handler = kafkaConfig.kafkaErrorHandler(kafkaOperations);
-        var removed = handler.removeClassification(IdempotencyConflictException.class);
         assertThat(removed).isNotNull().isFalse();
     }
 
@@ -111,14 +105,16 @@ class KafkaConfigTest {
 
     @Test
     void propertiesShouldExposeRetryConfiguration() {
-        assertThat(DEFAULT_PROPS.retry().interval()).isEqualTo(Duration.ofSeconds(5));
-        assertThat(DEFAULT_PROPS.retry().maxAttempts()).isEqualTo(60);
+        assertAll(
+                () -> assertThat(DEFAULT_PROPS.retry().interval()).isEqualTo(Duration.ofSeconds(5)),
+                () -> assertThat(DEFAULT_PROPS.retry().maxAttempts()).isEqualTo(60));
     }
 
     @Test
     void propertiesShouldExposeSeparateTimeouts() {
-        assertThat(DEFAULT_PROPS.producer().sendTimeout()).isEqualTo(Duration.ofSeconds(10));
-        assertThat(DEFAULT_PROPS.dlt().sendTimeout()).isEqualTo(Duration.ofSeconds(15));
+        assertAll(
+                () -> assertThat(DEFAULT_PROPS.producer().sendTimeout()).isEqualTo(Duration.ofSeconds(10)),
+                () -> assertThat(DEFAULT_PROPS.dlt().sendTimeout()).isEqualTo(Duration.ofSeconds(15)));
     }
 
     @Test
@@ -132,25 +128,27 @@ class KafkaConfigTest {
                     return CompletableFuture.completedFuture(new SendResult<>(sent,
                             new RecordMetadata(new TopicPartition(sent.topic(), 0), 0, 0, 0, 0, 0)));
                 });
-        var handler = new KafkaConfig(props).kafkaErrorHandler(kafkaOperations);
-        var record = new ConsumerRecord<>("retry-topic", 0, 1L, "retry-id",
+        var handler = new KafkaConfig(props, 1).kafkaErrorHandler(kafkaOperations);
+        var consumerRecord = new ConsumerRecord<>("retry-topic", 0, 1L, "retry-id",
                 new SearchKafkaMessage("retry-id", "hotel", "2026-12-29", "2026-12-31", List.of(30)));
         var consumer = mock(Consumer.class);
         var container = mock(MessageListenerContainer.class);
         when(container.isRunning()).thenReturn(true);
         var failure = new IllegalStateException("Database unavailable");
-        long before = System.nanoTime();
-        assertThat(handler.handleOne(failure, record, consumer, container)).isFalse();
-        long afterFirst = System.nanoTime();
-        assertThat(handler.handleOne(failure, record, consumer, container)).isFalse();
-        long afterSecond = System.nanoTime();
+        long before = System.currentTimeMillis();
+        assertThat(handler.handleOne(failure, consumerRecord, consumer, container)).isFalse();
+        long afterFirst = System.currentTimeMillis();
+        assertThat(handler.handleOne(failure, consumerRecord, consumer, container)).isFalse();
+        long afterSecond = System.currentTimeMillis();
         Mockito.verify(kafkaOperations, Mockito.never())
                 .send(ArgumentMatchers.<ProducerRecord<String, Object>>any());
-        assertThat(handler.handleOne(failure, record, consumer, container)).isTrue();
-        assertThat(Duration.ofNanos(afterFirst - before)).isGreaterThanOrEqualTo(Duration.ofMillis(100));
-        assertThat(Duration.ofNanos(afterSecond - afterFirst)).isGreaterThanOrEqualTo(Duration.ofMillis(100));
-        Mockito.verify(kafkaOperations).send(ArgumentMatchers.<ProducerRecord<String, Object>>any());
-        assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
+        assertAll(
+                () -> assertThat(handler.handleOne(failure, consumerRecord, consumer, container)).isTrue(),
+                () -> assertThat(Duration.ofMillis(afterFirst - before)).isGreaterThanOrEqualTo(Duration.ofMillis(100)),
+                () -> assertThat(Duration.ofMillis(afterSecond - afterFirst)).isGreaterThanOrEqualTo(Duration.ofMillis(100)));
+        assertAll(
+                () -> Mockito.verify(kafkaOperations).send(ArgumentMatchers.<ProducerRecord<String, Object>>any()),
+                () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull());
     }
 
     @SuppressWarnings("unchecked")
@@ -161,23 +159,25 @@ class KafkaConfigTest {
                 DEFAULT_PROPS.producer(), new HotelSearchKafkaProperties.Dlt(Duration.ofSeconds(2)));
         when(kafkaOperations.send(any(ProducerRecord.class))).thenAnswer(inv -> {
             ProducerRecord<String, Object> sent = inv.getArgument(0);
-            assertThat(sent.topic()).isEqualTo("test-topic.DLT");
-            assertThat(new String(sent.headers().lastHeader(CorrelationId.HEADER).value(), StandardCharsets.UTF_8))
-                    .isEqualTo("dlt-correlation");
-            assertThat(MDC.get(CorrelationId.MDC_KEY)).isEqualTo("dlt-correlation");
+            assertAll(
+                    () -> assertThat(sent.topic()).isEqualTo("test-topic.DLT"),
+                    () -> assertThat(new String(sent.headers().lastHeader(CorrelationId.HEADER).value(), StandardCharsets.UTF_8))
+                    .isEqualTo("dlt-correlation"),
+                    () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isEqualTo("dlt-correlation"));
             return CompletableFuture.completedFuture(new SendResult<>(sent,
                     new RecordMetadata(new TopicPartition(sent.topic(), 0), 0, 0, 0, 0, 0)));
         });
         var message = new SearchKafkaMessage("dlt-search", "hotel-1", "invalid", "2023-12-31", List.of(30));
-        var record = new ConsumerRecord<>("test-topic", 0, 42L, "dlt-search", message);
-        record.headers().add(CorrelationId.HEADER, "dlt-correlation".getBytes(StandardCharsets.UTF_8));
-        var handler = new KafkaConfig(props).kafkaErrorHandler(kafkaOperations);
+        var consumerRecord = new ConsumerRecord<>("test-topic", 0, 42L, "dlt-search", message);
+        consumerRecord.headers().add(CorrelationId.HEADER, "dlt-correlation".getBytes(StandardCharsets.UTF_8));
+        var handler = new KafkaConfig(props, 1).kafkaErrorHandler(kafkaOperations);
         try (var logs = new LogCapture(KafkaConfig.class.getName())) {
             handler.handleRemaining(new InvalidKafkaMessageException("invalid", new IllegalArgumentException()),
-                    List.of(record), mock(Consumer.class), mock(MessageListenerContainer.class));
+                    List.of(consumerRecord), mock(Consumer.class), mock(MessageListenerContainer.class));
             assertThat(logs.events()).anySatisfy(event -> {
-                assertThat(event.getFormattedMessage()).contains("recovered to DLT", "correlationId=dlt-correlation", "offset=42");
-                assertThat(event.getMDCPropertyMap()).containsEntry("correlationId", "dlt-correlation");
+                assertAll(
+                        () -> assertThat(event.getFormattedMessage()).contains("recovered to DLT", "correlationId=dlt-correlation", "offset=42"),
+                        () -> assertThat(event.getMDCPropertyMap()).containsEntry("correlationId", "dlt-correlation"));
             });
         }
         assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
@@ -192,29 +192,32 @@ class KafkaConfigTest {
                 DEFAULT_PROPS.producer(),
                 new HotelSearchKafkaProperties.Dlt(Duration.ofSeconds(2))
         );
-        var noRetryConfig = new KafkaConfig(noRetryProps);
+        var noRetryConfig = new KafkaConfig(noRetryProps, 1);
 
         var failedFuture = new CompletableFuture<SendResult<String, Object>>();
         failedFuture.completeExceptionally(new TimeoutException("DLT broker unavailable"));
         when(kafkaOperations.send(any(ProducerRecord.class))).thenReturn(failedFuture);
 
         DefaultErrorHandler handler = noRetryConfig.kafkaErrorHandler(kafkaOperations);
-        var record = new ConsumerRecord<>("test-topic", 0, 0L, "key",
+        var consumerRecord = new ConsumerRecord<>("test-topic", 0, 0L, "key",
                 new SearchKafkaMessage("key", "hotel", "2026-12-29", "2026-12-31", List.of(30)));
 
         var consumer = mock(Consumer.class);
         try (var logs = new LogCapture(KafkaConfig.class.getName())) {
-            assertThatThrownBy(() -> handler.handleRemaining(
-                    new RuntimeException("original"), List.of(record), consumer, mock(MessageListenerContainer.class)))
-                    .hasMessage("Record in retry and not yet recovered");
-            assertThat(logs.events()).anySatisfy(event -> {
-                assertThat(event.getFormattedMessage()).contains("DLT recovery failed", "searchId=key", "dltTopic=test-topic.DLT");
-                assertThat(event.getThrowableProxy()).isNotNull();
-            });
+            assertAll(
+                    () -> assertThatThrownBy(() -> handler.handleRemaining(
+                    new RuntimeException("original"), List.of(consumerRecord), consumer, mock(MessageListenerContainer.class)))
+                    .hasMessage("Record in retry and not yet recovered"),
+                    () -> assertThat(logs.events()).anySatisfy(event -> {
+                assertAll(
+                        () -> assertThat(event.getFormattedMessage()).contains("DLT recovery failed", "searchId=key", "dltTopic=test-topic.DLT"),
+                        () -> assertThat(event.getThrowableProxy()).isNotNull());
+            }));
         }
-        Mockito.verify(kafkaOperations).send(ArgumentMatchers.<ProducerRecord<String, Object>>any());
-        Mockito.verify(consumer).seek(new TopicPartition("test-topic", 0), 0L);
-        assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
+        assertAll(
+                () -> Mockito.verify(kafkaOperations).send(ArgumentMatchers.<ProducerRecord<String, Object>>any()),
+                () -> Mockito.verify(consumer).seek(new TopicPartition("test-topic", 0), 0L),
+                () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull());
     }
     private static JsonMapper applicationMapper() {
         var builder = JsonMapper.builder();
@@ -229,15 +232,17 @@ class KafkaConfigTest {
     @ParameterizedTest
     @ValueSource(strings = {"[\"30\"]", "[30.9]", "[true]", "[null]", "{}"})
     void configuredDeserializerShouldRejectInvalidAgeTypes(String ages) {
-        var factory = kafkaConfig.kafkaConsumerFactory(new KafkaProperties(), applicationMapper());
+        var factory = kafkaConfig.kafkaConsumerFactory(new KafkaProperties(), applicationMapper(), new SimpleMeterRegistry());
         var deserializer = factory.getValueDeserializer();
         deserializer.configure(factory.getConfigurationProperties(), false);
         byte[] json = ("{\"searchId\":\"strict-id\",\"hotelId\":\"hotel\",\"checkIn\":\"2026-12-29\",\"checkOut\":\"2026-12-31\",\"ages\":" + ages + "}")
                 .getBytes(StandardCharsets.UTF_8);
         var headers = new RecordHeaders();
-        assertThat(deserializer.deserialize("test-topic", headers, json)).isNull();
+        var decoded = deserializer.deserialize("test-topic", headers, json);
         var header = headers.lastHeader(KafkaUtils.VALUE_DESERIALIZER_EXCEPTION_HEADER);
-        assertThat(header).isNotNull();
+        assertAll(
+                () -> assertThat(decoded).isNull(),
+                () -> assertThat(header).isNotNull());
         var failure = SerializationUtils.byteArrayToDeserializationException(
                 new LogAccessor(KafkaConfigTest.class), header);
         assertThat(failure.getData()).containsExactly(json);
@@ -247,8 +252,8 @@ class KafkaConfigTest {
     void configuredSerdesShouldRoundTripValidMessageAndPreserveOrder() {
         var mapper = applicationMapper();
         var kafkaProperties = new KafkaProperties();
-        var producerFactory = kafkaConfig.kafkaProducerFactory(kafkaProperties, mapper);
-        var consumerFactory = kafkaConfig.kafkaConsumerFactory(kafkaProperties, mapper);
+        var producerFactory = kafkaConfig.kafkaProducerFactory(kafkaProperties, mapper, new SimpleMeterRegistry());
+        var consumerFactory = kafkaConfig.kafkaConsumerFactory(kafkaProperties, mapper, new SimpleMeterRegistry());
         var serializer = producerFactory.getValueSerializer();
         var deserializer = consumerFactory.getValueDeserializer();
         serializer.configure(producerFactory.getConfigurationProperties(), false);
@@ -256,9 +261,10 @@ class KafkaConfigTest {
         var message = new SearchKafkaMessage("round-trip", "hotel", "2026-12-29", "2026-12-31", List.of(30, 1, 30));
         var headers = new RecordHeaders();
         byte[] json = serializer.serialize("test-topic", headers, message);
-        assertThat(deserializer.deserialize("test-topic", headers, json)).isEqualTo(message);
-        assertThat(serializer.serialize("test-topic", headers, null)).isNull();
-        assertThat(deserializer.deserialize("test-topic", headers, (byte[]) null)).isNull();
+        assertAll(
+                () -> assertThat(deserializer.deserialize("test-topic", headers, json)).isEqualTo(message),
+                () -> assertThat(serializer.serialize("test-topic", headers, null)).isNull(),
+                () -> assertThat(deserializer.deserialize("test-topic", headers, (byte[]) null)).isNull());
     }
 
     @Test
@@ -266,38 +272,40 @@ class KafkaConfigTest {
         byte[] original = "{not valid json!!!}".getBytes(StandardCharsets.UTF_8);
         var kafkaProperties = new KafkaProperties();
         var mapper = applicationMapper();
-        var consumerFactory = kafkaConfig.kafkaConsumerFactory(kafkaProperties, mapper);
+        var consumerFactory = kafkaConfig.kafkaConsumerFactory(kafkaProperties, mapper, new SimpleMeterRegistry());
         var deserializer = consumerFactory.getValueDeserializer();
         deserializer.configure(consumerFactory.getConfigurationProperties(), false);
-        var record = new ConsumerRecord<String, SearchKafkaMessage>("test-topic", 0, 7L, "bad-key", null);
-        record.headers().add(CorrelationId.HEADER, "raw-dlt-correlation".getBytes(StandardCharsets.UTF_8));
-        assertThat(deserializer.deserialize(record.topic(), record.headers(), original)).isNull();
+        var consumerRecord = new ConsumerRecord<String, SearchKafkaMessage>("test-topic", 0, 7L, "bad-key", null);
+        consumerRecord.headers().add(CorrelationId.HEADER, "raw-dlt-correlation".getBytes(StandardCharsets.UTF_8));
+        assertThat(deserializer.deserialize(consumerRecord.topic(), consumerRecord.headers(), original)).isNull();
         var failure = SerializationUtils.byteArrayToDeserializationException(
                 new LogAccessor(KafkaConfigTest.class),
-                record.headers().lastHeader(KafkaUtils.VALUE_DESERIALIZER_EXCEPTION_HEADER));
-        var producerFactory = kafkaConfig.kafkaProducerFactory(kafkaProperties, mapper);
+                consumerRecord.headers().lastHeader(KafkaUtils.VALUE_DESERIALIZER_EXCEPTION_HEADER));
+        var producerFactory = kafkaConfig.kafkaProducerFactory(kafkaProperties, mapper, new SimpleMeterRegistry());
         var serializer = producerFactory.getValueSerializer();
         serializer.configure(producerFactory.getConfigurationProperties(), false);
         when(kafkaOperations.send(ArgumentMatchers.<ProducerRecord<String, Object>>any())).thenAnswer(inv -> {
             ProducerRecord<String, Object> sent = inv.getArgument(0);
-            assertThat(sent.topic()).isEqualTo("hotel_availability_searches.DLT");
-            assertThat(sent.key()).isEqualTo("bad-key");
-            assertThat(sent.value()).isInstanceOf(byte[].class);
-            assertThat(serializer.serialize(sent.topic(), sent.headers(), sent.value())).containsExactly(original);
-            assertThat(new String(sent.headers().lastHeader(CorrelationId.HEADER).value(), StandardCharsets.UTF_8))
-                    .isEqualTo("raw-dlt-correlation");
+            assertAll(
+                    () -> assertThat(sent.topic()).isEqualTo("hotel_availability_searches.DLT"),
+                    () -> assertThat(sent.key()).isEqualTo("bad-key"),
+                    () -> assertThat(sent.value()).isInstanceOf(byte[].class),
+                    () -> assertThat(serializer.serialize(sent.topic(), sent.headers(), sent.value())).containsExactly(original),
+                    () -> assertThat(new String(sent.headers().lastHeader(CorrelationId.HEADER).value(), StandardCharsets.UTF_8))
+                    .isEqualTo("raw-dlt-correlation"));
             return CompletableFuture.completedFuture(new SendResult<>(sent,
                     new RecordMetadata(new TopicPartition(sent.topic(), 0), 0, 0, 0, 0, 0)));
         });
         var handler = kafkaConfig.kafkaErrorHandler(kafkaOperations);
-        assertThat(handler.handleOne(failure, record, mock(Consumer.class), mock(MessageListenerContainer.class))).isTrue();
-        Mockito.verify(kafkaOperations).send(ArgumentMatchers.<ProducerRecord<String, Object>>any());
-        assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull();
+        assertAll(
+                () -> assertThat(handler.handleOne(failure, consumerRecord, mock(Consumer.class), mock(MessageListenerContainer.class))).isTrue(),
+                () -> Mockito.verify(kafkaOperations).send(ArgumentMatchers.<ProducerRecord<String, Object>>any()),
+                () -> assertThat(MDC.get(CorrelationId.MDC_KEY)).isNull());
     }
 
     @Test
     void nullMessageShouldRecoverImmediatelyWithoutRetry() {
-        var record = new ConsumerRecord<String, SearchKafkaMessage>("test-topic", 0, 8, "null-key", null);
+        var consumerRecord = new ConsumerRecord<String, SearchKafkaMessage>("test-topic", 0, 8, "null-key", null);
         when(kafkaOperations.send(ArgumentMatchers.<ProducerRecord<String, Object>>any())).thenAnswer(inv -> {
             ProducerRecord<String, Object> sent = inv.getArgument(0);
             assertThat(sent.value()).isNull();
@@ -306,51 +314,76 @@ class KafkaConfigTest {
         });
         var handler = kafkaConfig.kafkaErrorHandler(kafkaOperations);
         long start = System.nanoTime();
-        assertThat(handler.handleOne(new InvalidKafkaMessageException("null message", null), record,
-                mock(Consumer.class), mock(MessageListenerContainer.class))).isTrue();
-        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(DEFAULT_PROPS.retry().interval());
+        assertAll(
+                () -> assertThat(handler.handleOne(new InvalidKafkaMessageException("null message", null), consumerRecord,
+                mock(Consumer.class), mock(MessageListenerContainer.class))).isTrue(),
+                () -> assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(DEFAULT_PROPS.retry().interval()));
         Mockito.verify(kafkaOperations).send(ArgumentMatchers.<ProducerRecord<String, Object>>any());
     }
 
-    @Test
-    void springBootShouldWireConfiguredFactoriesAndStrictMapper() {
+    @ParameterizedTest
+    @ValueSource(strings = {"record", "batch"})
+    void springBootShouldWireConfiguredFactoriesAndStrictMapper(String ackMode) {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
                         JacksonAutoConfiguration.class,
                         KafkaAutoConfiguration.class))
                 .withUserConfiguration(KafkaConfig.class, JacksonConfig.class)
+                .withBean(io.micrometer.core.instrument.MeterRegistry.class, SimpleMeterRegistry::new)
                 .withPropertyValues(
                         "spring.kafka.admin.auto-create=false",
                         "spring.kafka.producer.acks=all",
                         "spring.kafka.producer.properties.enable.idempotence=true",
                         "spring.kafka.consumer.group-id=configuration-test",
-                        "spring.kafka.listener.ack-mode=record",
+                        "spring.kafka.listener.ack-mode=" + ackMode,
+                        "spring.kafka.listener.concurrency=6",
                         "spring.jackson.deserialization.fail-on-unknown-properties=true",
                         "hotel-search.kafka.topic=test-topic", "hotel-search.kafka.dlt-suffix=.DLT",
                         "hotel-search.kafka.retry.interval=5s", "hotel-search.kafka.retry.max-attempts=60",
                         "hotel-search.kafka.producer.send-timeout=10s", "hotel-search.kafka.dlt.send-timeout=10s")
                 .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    assertThat(context).hasSingleBean(SearchKafkaProducer.class);
-                    assertThat(context).hasSingleBean(KafkaTemplate.class);
+                    assertAll(
+                            () -> assertThat(context).hasNotFailed(),
+                            () -> assertThat(context).hasSingleBean(SearchKafkaProducer.class),
+                            () -> assertThat(context).hasSingleBean(KafkaTemplate.class));
                     var mapper = context.getBean(JsonMapper.class);
-                    assertThatThrownBy(() -> mapper.readValue("\"30\"", Integer.class))
-                            .isInstanceOf(MismatchedInputException.class);
-                    assertThatThrownBy(() -> mapper.readValue("30.9", Integer.class))
-                            .isInstanceOf(MismatchedInputException.class);
-                    assertThatThrownBy(() -> mapper.readValue("30", String.class))
-                            .isInstanceOf(MismatchedInputException.class);
+                    assertAll(
+                            () -> assertThatThrownBy(() -> mapper.readValue("\"30\"", Integer.class))
+                            .isInstanceOf(MismatchedInputException.class),
+                            () -> assertThatThrownBy(() -> mapper.readValue("30.9", Integer.class))
+                            .isInstanceOf(MismatchedInputException.class),
+                            () -> assertThatThrownBy(() -> mapper.readValue("30", String.class))
+                            .isInstanceOf(MismatchedInputException.class));
                     var producer = context.getBean(DefaultKafkaProducerFactory.class);
                     assertThat(producer.getConfigurationProperties()).containsEntry("acks", "all")
                             .containsEntry("enable.idempotence", "true");
-                    var listener = context.getBean("kafkaListenerContainerFactory",
+                    ConcurrentKafkaListenerContainerFactory<?, ?> listener = context.getBean("kafkaListenerContainerFactory",
                             ConcurrentKafkaListenerContainerFactory.class);
                     assertThat(listener.getContainerProperties().getAckMode())
-                            .isEqualTo(ContainerProperties.AckMode.RECORD);
+                            .isEqualTo(ContainerProperties.AckMode.valueOf(ackMode.toUpperCase(java.util.Locale.ROOT)));
+                    assertAll(
+                            () -> assertThat(listener.getContainerProperties().isSyncCommits()).isTrue(),
+                            () -> assertThat(listener.createContainer("test-topic").getConcurrency()).isEqualTo(6),
+                            () -> assertThat(listener.isBatchListener()).isFalse());
                     var executor = (SimpleAsyncTaskExecutor) listener.getContainerProperties().getListenerTaskExecutor();
                     var virtualThread = new CompletableFuture<Boolean>();
                     executor.execute(() -> virtualThread.complete(Thread.currentThread().isVirtual()));
                     assertThat(virtualThread.get(5, TimeUnit.SECONDS)).isTrue();
                 });
     }
+
+    @Test
+    void configuredPartitionsShouldApplyToSearchAndDltTopics() {
+        var config = new KafkaConfig(DEFAULT_PROPS, 3);
+        org.junit.jupiter.api.Assertions.assertAll(
+                () -> assertThat(config.searchesTopic().numPartitions()).isEqualTo(3),
+                () -> assertThat(config.dltTopic().numPartitions()).isEqualTo(3));
+    }
+
+    @Test
+    void nonPositivePartitionsShouldFailConfiguration() {
+        assertThatThrownBy(() -> new KafkaConfig(DEFAULT_PROPS, 0))
+                .isInstanceOf(IllegalArgumentException.class).hasMessage("Kafka partitions must be positive");
+    }
+
 }

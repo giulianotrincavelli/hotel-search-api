@@ -28,6 +28,7 @@ import java.util.stream.Collectors;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    private static final String VALIDATION_FAILED = "Validation failed";
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -38,7 +39,7 @@ public class GlobalExceptionHandler {
                 .toList();
 
         return ResponseEntity.badRequest()
-                .body(new ErrorResponse(400, "Validation failed", errors));
+                .body(new ErrorResponse(400, VALIDATION_FAILED, errors));
     }
 
     @ExceptionHandler(ConstraintViolationException.class)
@@ -49,7 +50,7 @@ public class GlobalExceptionHandler {
                 .toList();
 
         return ResponseEntity.badRequest()
-                .body(new ErrorResponse(400, "Validation failed", errors));
+                .body(new ErrorResponse(400, VALIDATION_FAILED, errors));
     }
 
     @ExceptionHandler(HandlerMethodValidationException.class)
@@ -60,7 +61,7 @@ public class GlobalExceptionHandler {
                 .toList();
 
         return ResponseEntity.badRequest()
-                .body(new ErrorResponse(400, "Validation failed", errors));
+                .body(new ErrorResponse(400, VALIDATION_FAILED, errors));
     }
 
     @ExceptionHandler(InvalidSearchException.class)
@@ -76,27 +77,32 @@ public class GlobalExceptionHandler {
                 return ResponseEntity.badRequest()
                         .body(new ErrorResponse(400, "Unknown property: " + unknown.getPropertyName()));
             }
-            if (cause instanceof MismatchedInputException mie) {
-                String field = buildFieldPath(mie);
-                if (field.isEmpty()) {
-                    continue;
-                }
-                if (isDateTarget(mie)) {
-                    return ResponseEntity.badRequest()
-                            .body(new ErrorResponse(400, field + " must be a valid date in dd/MM/yyyy format"));
-                }
-                if (isIntegerTarget(mie)) {
-                    return ResponseEntity.badRequest()
-                            .body(new ErrorResponse(400, field + " must contain only integer numbers"));
-                }
-                if (isStringTarget(mie)) {
-                    return ResponseEntity.badRequest()
-                            .body(new ErrorResponse(400, field + " must be a string"));
+            if (cause instanceof MismatchedInputException mismatch) {
+                String message = mismatchMessage(mismatch);
+                if (message != null) {
+                    return ResponseEntity.badRequest().body(new ErrorResponse(400, message));
                 }
             }
         }
         return ResponseEntity.badRequest()
                 .body(new ErrorResponse(400, "Malformed request body"));
+    }
+
+    private static String mismatchMessage(MismatchedInputException mismatch) {
+        String field = buildFieldPath(mismatch);
+        if (field.isEmpty()) {
+            return null;
+        }
+        if (isDateTarget(mismatch)) {
+            return field + " must be a valid date in dd/MM/yyyy format";
+        }
+        if (isIntegerTarget(mismatch)) {
+            return field + " must contain only integer numbers";
+        }
+        if (isStringTarget(mismatch)) {
+            return field + " must be a string";
+        }
+        return null;
     }
 
     @ExceptionHandler(MissingServletRequestParameterException.class)
@@ -113,7 +119,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(PublishException.class)
     public ResponseEntity<ErrorResponse> handlePublishFailure(PublishException ex) {
-        log.warn("Message publish failed: {}", ex.getMessage());
+        log.error("Message publish failed", ex);
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                 .body(new ErrorResponse(503, "Service temporarily unavailable"));
     }
